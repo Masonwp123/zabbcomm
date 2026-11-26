@@ -1,0 +1,24 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project version="4">
+  <component name="ClaudeCodeTabState">
+    <option name="tabSessions">
+      <map>
+        <entry key="0">
+          <value>
+            <TabSessionState>
+              <option name="projectPath" value="C:\Users\MasonParker\Repos\zabbcomm" />
+              <option name="provider" value="claude" />
+              <option name="sessionId" value="1c41c298-d1cf-449c-acf2-1615ed28db20" />
+              <option name="cwd" value="C:\Users\MasonParker\Repos\zabbcomm" />
+              <option name="model" value="claude-opus-5-5[1m]" />
+              <option name="permissionMode" value="default" />
+              <option name="claudeSupplierId" value="__cli_login__" />
+              <option name="codexSupplierId" value="__session_supplier_unavailable__" />
+              <option name="ompApprovalMode" value="" />
+            </TabSessionState>
+          </value>
+        </entry>
+      </map>
+    </option>
+  </component>
+</project>
