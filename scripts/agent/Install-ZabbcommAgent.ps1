@@ -1,37 +1,3 @@
-<#
-.SYNOPSIS
-    Installs, checks and repairs the zabbcomm check-in agent.
-
-.DESCRIPTION
-    An alternative to Send-ZabbcommCheckin.ps1 for faster detection: a Windows scheduled
-    task on the device checks in every 5 minutes. Run this script from a Syncro policy
-    (daily is enough). Each run checks that the agent is installed, current and running,
-    and repairs it if not. Use this or Send-ZabbcommCheckin.ps1 on a device, not both.
-
-    The agent removes itself if zabbcomm denies the device, or if this script stops
-    reaching it (it expires). Each run of this script restarts the expiry count. The
-    count covers only time the device is powered on:
-
-      expireAfterOnlineDays   days of running AND reaching zabbcomm (default 7)
-      expireAfterRunningDays  days of running at all (default 30)
-
-    Written for Windows PowerShell 5.1, run as SYSTEM.
-
-    Syncro supplies these variables. Do not assign them in this script.
-
-      $orgName     Platform variable: the organization (customer) name
-      $assetName   Platform variable: the asset (computer) name
-      $deviceType  Dropdown variable, set per policy: server or user
-      $appUrl      Script variable: zabbcomm base URL, e.g. https://zabbcomm.example.com
-      $apiToken    Script variable: the app's API_TOKEN
-      $expireAfterOnlineDays, $expireAfterRunningDays
-                   Optional script variables: whole days, 0 turns that limit off
-
-    Exit codes:
-      0  The agent is healthy, or it removed itself because zabbcomm denies this device
-      1  Setup problem, rejected check-ins, or the agent couldn't be made healthy
-#>
-
 # Bump this whenever either part of the agent changes behaviour.
 $AgentVersion = '2.1.0'
 $IntervalMinutes = 5

@@ -20,9 +20,11 @@ services:
       ZABBIX_DRY_RUN: false
 
       # How often Syncro runs the check-in script.
+      # Set to something like 300 (5 minutes) if using the agent
       CHECKIN_INTERVAL: 900
       # Silence after which a device counts as offline. Must be more than twice
       # CHECKIN_INTERVAL. Raise it if check-ins often run several minutes late.
+      # Set to something like 900 (15 minutes) if using the agent
       DEVICE_TIMEOUT: 2100
       # How often status is evaluated and sent to Zabbix.
       EVAL_INTERVAL: 60

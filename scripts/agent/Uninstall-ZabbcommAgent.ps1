@@ -1,22 +1,3 @@
-<#
-.SYNOPSIS
-    Removes the zabbcomm check-in agent from this device.
-
-.DESCRIPTION
-    Removes the scheduled task and the agent folder, including its stored token. Safe to
-    run when nothing is installed. Remove Install-ZabbcommAgent.ps1 from the device's
-    Syncro policy first, or its next run installs the agent again.
-
-    The device stays in zabbcomm until DEVICE_FORGET_AFTER and reads as offline until
-    then. Add it to deny.json on the server to drop it straight away.
-
-    Written for Windows PowerShell 5.1, run as SYSTEM. Needs no Syncro variables.
-
-    Exit codes:
-      0  The agent is gone
-      1  Something couldn't be removed
-#>
-
 $ErrorActionPreference = 'Stop'
 
 if ([string]::IsNullOrWhiteSpace($env:ProgramData)) {
