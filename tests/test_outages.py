@@ -6,7 +6,7 @@ from collections.abc import Callable
 
 import pytest
 
-import zabbcomm as z
+import zabbcomm.__main__ as z
 
 INTERVAL, TIMEOUT, EVAL = 900, 2100, 60
 LATE = 120  # seconds a scheduled run may start late

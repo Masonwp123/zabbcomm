@@ -4,7 +4,39 @@ paths:
   - "scripts/**/*.psm1"
 ---
 
-# Endpoint check-in script (Syncro / PowerShell) rules
+# Endpoint scripts (Syncro / PowerShell) rules
+
+Two ways to check in. Inputs, compatibility and versioning rules below apply to both.
+"Leave no footprint" and "Behaviour" describe the direct script,
+`Send-ZabbcommCheckin.ps1`. The agent is covered under "Agent".
+
+## Agent (`scripts/agent/`)
+
+- The agent script is **embedded in `Install-ZabbcommAgent.ps1`** as a single-quoted
+  here-string, so Syncro needs one file. No line in it may start with `'@`.
+- The installer is idempotent: it changes nothing on a healthy device. "Healthy" means
+  locked folder, exact script and config, correct task, and a run within 3 intervals.
+  An unreachable server is still healthy; rejected check-ins exit `1`.
+- **The install folder runs as SYSTEM and holds the token.** It must be owned and
+  writable only by SYSTEM and Administrators. Any user can create folders in
+  `ProgramData`, so a folder that isn't locked down is deleted and recreated, never
+  reused. Never put the token in task arguments.
+- **Never delete with `Remove-Item -Recurse`.** Use `Remove-Tree`, which removes links
+  without following them. (`[IO.Directory]::Delete($path, $true)` fails on a folder
+  containing a link; the agent only uses it on its own locked folder.)
+- **Self-removal has exactly two triggers:** a `410` with a valid
+  `X-Zabbcomm-Uninstall` signature for that request's nonce (keep the server's
+  `uninstall_signature` and `Test-UninstallOrder` in step), or expiry.
+- **Expiry:** the installer pings (`ping.txt`, new value each run) **before** validating
+  Syncro variables, so a policy mistake can't expire working agents. The agent is the
+  only writer of `usage.json`, and resets its counts when the ping changes. Count runs;
+  never compare dates. Only a `204` counts as online. Unreadable counters restart from
+  zero, so errors delay removal rather than cause it.
+- Test expiry by preloading `usage.json` with the current ping and counts just below
+  the limit.
+- Test with `$env:ProgramData` redirected and the ScheduledTasks commands replaced.
+  `Import-Module ScheduledTasks` **before** defining stand-ins, or loading the module
+  overwrites them. Never register a real task on a developer machine without asking.
 
 `scripts/Send-ZabbcommCheckin.ps1` runs on client Windows machines we don't control, as
 SYSTEM, **directly from a Syncro policy every 15 minutes** (`CHECKIN_INTERVAL`). It has

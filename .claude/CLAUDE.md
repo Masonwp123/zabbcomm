@@ -27,6 +27,9 @@ Syncro policy script        --->  POST {APP_URL}/api/v1/checkin
    `user`) from a dropdown variable set per policy. It POSTs them to `APP_URL`. It
    **installs nothing on the client**: no scheduled tasks, no files. See
    `.claude/rules/powershell-syncro.md`.
+   **Alternative for faster detection:** `scripts/agent/Install-ZabbcommAgent.ps1`
+   installs a scheduled task that checks in every 5 minutes (see "Endpoint agent and
+   deny list" below). A device uses one method or the other.
 2. For each `(org, device)` the app stores `last_seen` and `last_ip`, the WAN IP that
    check-in arrived from. It keeps them in memory and writes them to disk regularly
    (see Persistence).
@@ -97,6 +100,51 @@ parent (site, else org) is **confirmed** up:
   away (`prev_ip` / `prev_seen`), the IP isn't treated as a site. This covers a server
   that was already off when the ISP address changed.
 
+### Endpoint agent and deny list
+
+The optional agent (requested 2026-11-26, in addition to the footprint-free script):
+
+- Syncro runs the installer (daily is enough). It checks that the folder, script, config
+  and scheduled task `\zabbcomm\Checkin` are present, current and have run recently, and
+  repairs them if not. `Uninstall-ZabbcommAgent.ps1` removes everything.
+- It's a **scheduled task, not a Windows service**: a script can't be a service without
+  compiling or bundling an executable on client devices.
+- With every device on the agent, use `CHECKIN_INTERVAL=300` and `DEVICE_TIMEOUT=900`.
+  With a mix, keep the settings for the slowest method (900 / 2100).
+
+**Expiry** (backstop for when the deny list can't help): every installer run writes a
+new ping on the device, and the agent removes itself once either limit passes without
+one. Syncro script variables, whole days, `0` turns a limit off:
+
+| Variable | Default | Counts |
+|---|---|---|
+| `expireAfterOnlineDays` | 7 | runs where zabbcomm accepted the check-in (`204`) |
+| `expireAfterRunningDays` | 30 | all runs, so it works when the app is gone or the token changed |
+
+- Time is counted in agent runs, not dates: powered-off time and clock changes don't
+  matter. Offline, rejected and captive-portal runs never count as online.
+- Expiry can't help if someone else keeps Syncro running the installer. That's what the
+  deny list is for.
+- An expired device stays in the app and alerts as offline. That is intentional: it
+  shows where Syncro stopped reaching a device that should be monitored.
+
+**Deny list** (`DATA_DIR/deny.json`, re-read when it changes, no restart):
+
+```json
+{ "orgs": ["Acme Inc"], "devices": [{ "org": "Globex", "device": "GLOBEX-WS01" }] }
+```
+
+- Names match by slug. Unknown keys or invalid JSON log an error and **deny nobody**.
+- A denied check-in gets `410` and the device is removed from the registry (the monitor
+  also drops denied devices), so it leaves discovery instead of alerting.
+- If the request carried `X-Zabbcomm-Nonce` (32 hex), the reply has
+  `X-Zabbcomm-Uninstall: HMAC-SHA256(API_TOKEN, "uninstall:" + nonce)`. **The agent
+  uninstalls only on a `410` with a valid signature.** Nothing else, including `401` and
+  `403`, may ever trigger removal.
+- Consequence: **rotating `API_TOKEN` stops denial reaching agents that hold the old
+  token** (they get `401`). Deny first, rotate afterwards.
+- Footprint-free script devices get the `410` too, but have nothing to remove.
+
 **Guiding principle:** the app decides *state* and Zabbix decides *alerting* (severity,
 escalation, maintenance windows, business hours). Don't put alert policy in Python.
 
@@ -108,6 +156,9 @@ escalation, maintenance windows, business hours). Don't put alert policy in Pyth
 - **Reported working by the user** (2026-11-26) against their Zabbix server.
 - **Not yet confirmed there:** the `last_checkin` items, added afterwards.
 - **Not yet confirmed in Syncro:** script version 1.2.0, which takes `$deviceType`.
+- **Agent (2.1.0) not yet run on a real device:** tested with stand-in task commands,
+  without elevation. Real task registration, the SYSTEM-only folder ACL and
+  self-removal as SYSTEM are unverified.
 - **Not yet run under Docker since the pre-publish fixes:** the `data-permissions`
   service and loopback port binding in `compose.yaml`, and the release workflow's test
   job and tag ranking (the ranking script was tested locally).
@@ -140,11 +191,15 @@ I/O:
 ```
 scripts/
   Send-ZabbcommCheckin.ps1   Syncro policy script, runs every 15 min, one check-in per run
+  agent/
+    Install-ZabbcommAgent.ps1    installs / checks / repairs the 5-minute agent
+    Uninstall-ZabbcommAgent.ps1  removes it
 zabbix/
   zabbcomm_template.yaml     Zabbix template export (items, LLD rules, triggers)
 tests/
   test_zabbcomm.py           unit and API tests
   test_outages.py            outages and recoveries simulated over time
+  test_deny.py               deny list and signed uninstall replies
 compose.yaml                 Docker Compose deployment; settings are listed inline
 .env.example                 the few values compose.yaml reads from .env
 Dockerfile                   includes the HEALTHCHECK
@@ -167,6 +222,7 @@ Dockerfile                   includes the HEALTHCHECK
     **before reading any of the body**, for every request that isn't GET or HEAD. Don't
     move auth into a route dependency: FastAPI parses the body first.
   - `413` for a body over 8 KB (`MAX_BODY_BYTES`).
+  - `410` for a device on the deny list (see "Endpoint agent and deny list").
   - `422` for validation errors.
   - `403` when `MAX_ORGS` or `MAX_DEVICES_PER_ORG` would be exceeded.
 
@@ -292,8 +348,10 @@ settings:
   about 35 to 36 minutes after the last successful check-in (`DEVICE_TIMEOUT` +
   `EVAL_INTERVAL`). Lowering `DEVICE_TIMEOUT` toward one interval means a single late
   Syncro run raises a false alert. Faster detection would need a more frequent
-  check-in, which Syncro can't schedule without installing something on the client,
-  and we rejected that.
+  check-in, which Syncro can't schedule without installing something on the client.
+  The optional agent does that.
+- **The agent stores the shared token on each device**, readable by that device's local
+  administrators.
 - **The Syncro agent is in the path.** If the Syncro agent on a device is broken or
   stopped, that device reads as "endpoint offline". A Syncro-wide delay in running
   scheduled scripts looks like every device across all orgs going offline at once.

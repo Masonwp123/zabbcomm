@@ -53,3 +53,6 @@ paths:
     registry's timing fields must keep these passing.
 13. No token means 401 before the body is read; oversized bodies are 413.
 14. A Zabbix server that never replies times out.
+15. Deny list (`tests/test_deny.py`): denied devices get a signed `410` and leave the
+    registry; no signature without a valid nonce or token; an invalid file denies
+    nobody; changes apply without a restart.

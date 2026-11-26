@@ -11,6 +11,7 @@ Importing this module has no side effects: settings are only read in `create_app
 import asyncio
 import contextlib
 import hashlib
+import hmac
 import ipaddress
 import json
 import logging
@@ -31,6 +32,7 @@ from fastapi.responses import JSONResponse
 from pydantic import (
     AfterValidator,
     BaseModel,
+    ConfigDict,
     Field,
     SecretStr,
     StringConstraints,
@@ -250,6 +252,17 @@ class Registry:
 
     def devices(self) -> list[Device]:
         return [d for org_devices in self._orgs.values() for d in org_devices.values()]
+
+    def remove_where(self, matches: Callable[[str, str], bool]) -> list[Device]:
+        """Drop every device for which `matches(org_id, device_id)` is true."""
+        removed: list[Device] = []
+        for org_id, org_devices in list(self._orgs.items()):
+            for device_id in list(org_devices):
+                if matches(org_id, device_id):
+                    removed.append(org_devices.pop(device_id))
+            if not org_devices:
+                del self._orgs[org_id]
+        return removed
 
     def replace_all(self, devices: Iterable[Device]) -> None:
         """Load state (e.g. from a snapshot). Caps are not applied to loaded data.
@@ -601,6 +614,64 @@ class SnapshotStore:
             raise
 
 
+# -------------------------------------------------------------------------- deny list
+
+
+class DeniedDevice(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    org: str
+    device: str
+
+
+class DenyFile(BaseModel):
+    # Unknown keys are errors, so a typo is reported instead of silently doing nothing.
+    model_config = ConfigDict(extra="forbid")
+
+    orgs: list[str] = []
+    devices: list[DeniedDevice] = []
+
+
+class DenyList:
+    """Orgs and devices whose agents are told to uninstall: DATA_DIR/deny.json, re-read
+    whenever it changes. A missing or invalid file denies nobody."""
+
+    def __init__(self, path: Path) -> None:
+        self.path = path
+        self._stamp: tuple[int, int] | None = None
+        self._orgs: frozenset[str] = frozenset()
+        self._devices: frozenset[tuple[str, str]] = frozenset()
+
+    def refresh(self) -> None:
+        try:
+            info = self.path.stat()
+            stamp = (info.st_mtime_ns, info.st_size)
+        except OSError:
+            stamp = None
+        if stamp == self._stamp:
+            return
+        self._stamp = stamp
+        content = DenyFile()
+        if stamp is not None:
+            try:
+                # utf-8-sig: Windows editors may add a byte order mark.
+                content = DenyFile.model_validate_json(self.path.read_text(encoding="utf-8-sig"))
+            except (OSError, ValueError) as exc:
+                log.error("ignoring %s, so nobody is denied: %s", self.path, exc)
+        self._orgs = frozenset(slugify(name) for name in content.orgs)
+        self._devices = frozenset((slugify(d.org), slugify(d.device)) for d in content.devices)
+        log.info("deny list: %d orgs, %d devices", len(self._orgs), len(self._devices))
+
+    def denies(self, org_id: str, device_id: str) -> bool:
+        return org_id in self._orgs or (org_id, device_id) in self._devices
+
+
+def uninstall_signature(token: str, nonce: str) -> str:
+    """Proof that an uninstall order came from this server and answers this request. The
+    agent ignores any denial without it (captive portals, web filters, replays)."""
+    return hmac.new(token.encode(), f"uninstall:{nonce}".encode(), hashlib.sha256).hexdigest()
+
+
 # ----------------------------------------------------------------------- monitor loop
 
 NEW_ITEM_GRACE = 300
@@ -618,12 +689,14 @@ class Monitor:
         sender: Sender,
         store: SnapshotStore | None,
         started_at: float,
+        deny_list: DenyList | None = None,
     ) -> None:
         self.settings = settings
         self.registry = registry
         self.sender = sender
         self.store = store
         self.started_at = started_at
+        self.deny_list = deny_list
         self._discovery: dict[str, str] = {}
         self._discovery_pending = False  # True until Zabbix has accepted the latest version
         self._discovery_sent_at = float("-inf")
@@ -631,6 +704,11 @@ class Monitor:
 
     async def run_cycle(self, now: float) -> None:
         s = self.settings
+        if self.deny_list is not None:
+            # Denied devices stop checking in on purpose, so they mustn't alert.
+            self.deny_list.refresh()
+            for d in self.registry.remove_where(self.deny_list.denies):
+                log.info("removing denied device %s / %s", d.org_name, d.device_name)
         for d in self.registry.forget(now, s.device_forget_after):
             log.info("forgetting %s / %s (silent since %d)", d.org_name, d.device_name, d.last_seen)
 
@@ -736,6 +814,8 @@ class CheckIn(BaseModel):
     is_server: bool | None = None
 
 
+_NONCE = re.compile(r"[0-9a-f]{32}")
+
 MAX_BODY_BYTES = 8192
 """A check-in with the longest allowed names, fully escaped, is well under this."""
 
@@ -802,6 +882,8 @@ def create_app(
     settings = settings if settings is not None else load_settings()
     registry = Registry(settings.max_orgs, settings.max_devices_per_org, settings.confirm_window)
     store = SnapshotStore(settings.data_dir / "registry.json")
+    deny_list = DenyList(settings.data_dir / "deny.json")
+    token = settings.api_token.get_secret_value()
     if sender is None:
         sender = (
             DryRunSender()
@@ -813,7 +895,9 @@ def create_app(
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         registry.replace_all(store.load())
         log.info("loaded %d devices from %s", len(registry.devices()), store.path)
-        monitor = Monitor(settings, registry, sender, store, started_at=clock())
+        monitor = Monitor(
+            settings, registry, sender, store, started_at=clock(), deny_list=deny_list
+        )
         task = asyncio.create_task(monitor.run_forever(clock))
         try:
             yield
@@ -831,13 +915,22 @@ def create_app(
         title="zabbcomm", lifespan=lifespan, docs_url=None, redoc_url=None, openapi_url=None
     )
     app.state.registry = registry
-    app.add_middleware(RequestGuard, token=settings.api_token.get_secret_value())
+    app.add_middleware(RequestGuard, token=token)
 
     @app.post("/api/v1/checkin", status_code=status.HTTP_204_NO_CONTENT)
     async def checkin(body: CheckIn, request: Request) -> Response:
         # `async def` on purpose: it runs on the event loop (a plain `def` would run in a
         # threadpool), so registry updates can never interleave with a monitor cycle.
         ip = request.client.host if request.client else None
+        deny_list.refresh()
+        if deny_list.denies(slugify(body.org), slugify(body.device)):
+            registry.remove_where(deny_list.denies)
+            log.warning("denied check-in %s / %s from %s", body.org, body.device, ip)
+            nonce = request.headers.get("x-zabbcomm-nonce", "")
+            headers = {}
+            if _NONCE.fullmatch(nonce):
+                headers["X-Zabbcomm-Uninstall"] = uninstall_signature(token, nonce)
+            return JSONResponse({"detail": "device denied"}, status.HTTP_410_GONE, headers)
         try:
             registry.check_in(
                 body.org, body.device, ip, body.agent_version, clock(), body.is_server
