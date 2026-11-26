@@ -1,0 +1,275 @@
+zabbix_export:
+  version: '7.4'
+  template_groups:
+    - uuid: a571c0d144b14fd4a87a9d9b2aa9fcd6
+      name: Templates/Applications
+  templates:
+    - uuid: b880a3b5883746fd86e6ffe88277cd9a
+      template: 'zabbcomm by trapper'
+      name: 'zabbcomm by trapper'
+      description: |
+        Receives organization, site and endpoint status pushed by the zabbcomm connector.
+
+        Link this template to the host whose name matches the connector's ZABBIX_HOST
+        setting (default: zabbcomm). All items are Zabbix trapper items, so the host
+        needs no interface. Items for each organization, site and device are created by
+        discovery.
+
+        Status values: 1 = online, 0 = offline (alerts), 2 = offline but already covered
+        by a site or organization alert.
+      groups:
+        - name: Templates/Applications
+      items:
+        - uuid: d15a247dd7f04a00859054a014e73973
+          name: 'Connector heartbeat'
+          type: TRAP
+          key: zabbcomm.alive
+          description: 'Sent by the connector on every evaluation cycle.'
+          valuemap:
+            name: 'zabbcomm status'
+          tags:
+            - tag: component
+              value: connector
+          triggers:
+            - uuid: 69e73af4e71646bdab818f576f74ec5c
+              expression: 'nodata(/zabbcomm by trapper/zabbcomm.alive,{$ZABBCOMM.ALIVE.NODATA})=1'
+              name: 'zabbcomm connector not reporting'
+              priority: HIGH
+              description: 'No data from the connector. Organization, site and endpoint status is unknown until it returns.'
+              tags:
+                - tag: scope
+                  value: availability
+      discovery_rules:
+        - uuid: 2715255a26184fdaa19103ba561dbf2d
+          name: 'Organization discovery'
+          type: TRAP
+          key: zabbcomm.org.discovery
+          lifetime: 1d
+          item_prototypes:
+            - uuid: e0229ed02f084e22b2bbe647536b3591
+              name: '{#ORG}: status'
+              type: TRAP
+              key: 'zabbcomm.org.status[{#ORGID}]'
+              valuemap:
+                name: 'zabbcomm status'
+              tags:
+                - tag: component
+                  value: organization
+                - tag: organization
+                  value: '{#ORG}'
+              trigger_prototypes:
+                - uuid: 8c67f487b28f4980ab2c1ebc297b9ed1
+                  expression: 'last(/zabbcomm by trapper/zabbcomm.org.status[{#ORGID}])=0'
+                  name: '{#ORG}: all endpoints offline (internet or power outage)'
+                  priority: HIGH
+                  dependencies:
+                    - name: 'zabbcomm connector not reporting'
+                      expression: 'nodata(/zabbcomm by trapper/zabbcomm.alive,{$ZABBCOMM.ALIVE.NODATA})=1'
+                  tags:
+                    - tag: scope
+                      value: availability
+                - uuid: 60edd1b0c8cd4abe8341e802cfcbf995
+                  expression: 'nodata(/zabbcomm by trapper/zabbcomm.org.status[{#ORGID}],{$ZABBCOMM.STATUS.NODATA})=1'
+                  name: '{#ORG}: no status data'
+                  priority: AVERAGE
+                  dependencies:
+                    - name: 'zabbcomm connector not reporting'
+                      expression: 'nodata(/zabbcomm by trapper/zabbcomm.alive,{$ZABBCOMM.ALIVE.NODATA})=1'
+                  tags:
+                    - tag: scope
+                      value: availability
+            - uuid: f924114c13fd44988ade496160592705
+              name: '{#ORG}: devices online'
+              type: TRAP
+              key: 'zabbcomm.org.devices.online[{#ORGID}]'
+              preprocessing:
+                - type: DISCARD_UNCHANGED_HEARTBEAT
+                  parameters:
+                    - 1h
+              tags:
+                - tag: component
+                  value: organization
+                - tag: organization
+                  value: '{#ORG}'
+            - uuid: a6cd87427c314595b5e6670423985f10
+              name: '{#ORG}: devices total'
+              type: TRAP
+              key: 'zabbcomm.org.devices.total[{#ORGID}]'
+              preprocessing:
+                - type: DISCARD_UNCHANGED_HEARTBEAT
+                  parameters:
+                    - 1h
+              tags:
+                - tag: component
+                  value: organization
+                - tag: organization
+                  value: '{#ORG}'
+            - uuid: aa300801651c411c9ed207d206edeaa8
+              name: '{#ORG}: last check-in'
+              type: TRAP
+              key: 'zabbcomm.org.last_checkin[{#ORGID}]'
+              units: unixtime
+              preprocessing:
+                - type: DISCARD_UNCHANGED_HEARTBEAT
+                  parameters:
+                    - 1h
+              tags:
+                - tag: component
+                  value: organization
+                - tag: organization
+                  value: '{#ORG}'
+        - uuid: e05caf61a0164e09924a762548592926
+          name: 'Site discovery'
+          type: TRAP
+          key: zabbcomm.site.discovery
+          lifetime: 1d
+          item_prototypes:
+            - uuid: a6708322274841eaa8a88257a22ab985
+              name: '{#ORG} / site {#SITE}: status'
+              type: TRAP
+              key: 'zabbcomm.site.status[{#ORGID},{#SITEID}]'
+              valuemap:
+                name: 'zabbcomm status'
+              tags:
+                - tag: component
+                  value: site
+                - tag: organization
+                  value: '{#ORG}'
+                - tag: site
+                  value: '{#SITE}'
+              trigger_prototypes:
+                - uuid: 0ed865779aa14dbf8ebfc8d178f3b478
+                  expression: 'last(/zabbcomm by trapper/zabbcomm.site.status[{#ORGID},{#SITEID}])=0 and nodata(/zabbcomm by trapper/zabbcomm.site.status[{#ORGID},{#SITEID}],{$ZABBCOMM.STATUS.NODATA})=0'
+                  name: '{#ORG} / site {#SITE}: all endpoints offline'
+                  priority: HIGH
+                  dependencies:
+                    - name: 'zabbcomm connector not reporting'
+                      expression: 'nodata(/zabbcomm by trapper/zabbcomm.alive,{$ZABBCOMM.ALIVE.NODATA})=1'
+                  tags:
+                    - tag: scope
+                      value: availability
+            - uuid: cc3d94e522cb4ea08e3e523561d2a52e
+              name: '{#ORG} / site {#SITE}: devices online'
+              type: TRAP
+              key: 'zabbcomm.site.devices.online[{#ORGID},{#SITEID}]'
+              preprocessing:
+                - type: DISCARD_UNCHANGED_HEARTBEAT
+                  parameters:
+                    - 1h
+              tags:
+                - tag: component
+                  value: site
+                - tag: organization
+                  value: '{#ORG}'
+                - tag: site
+                  value: '{#SITE}'
+            - uuid: 49c472d284f445bda824a59804491a88
+              name: '{#ORG} / site {#SITE}: devices total'
+              type: TRAP
+              key: 'zabbcomm.site.devices.total[{#ORGID},{#SITEID}]'
+              preprocessing:
+                - type: DISCARD_UNCHANGED_HEARTBEAT
+                  parameters:
+                    - 1h
+              tags:
+                - tag: component
+                  value: site
+                - tag: organization
+                  value: '{#ORG}'
+                - tag: site
+                  value: '{#SITE}'
+            - uuid: 12dc3abd86e34d1bb90e0a6beee033a4
+              name: '{#ORG} / site {#SITE}: last check-in'
+              type: TRAP
+              key: 'zabbcomm.site.last_checkin[{#ORGID},{#SITEID}]'
+              units: unixtime
+              preprocessing:
+                - type: DISCARD_UNCHANGED_HEARTBEAT
+                  parameters:
+                    - 1h
+              tags:
+                - tag: component
+                  value: site
+                - tag: organization
+                  value: '{#ORG}'
+                - tag: site
+                  value: '{#SITE}'
+        - uuid: b7650f30ddb34d49aac123135355a025
+          name: 'Device discovery'
+          type: TRAP
+          key: zabbcomm.device.discovery
+          lifetime: 1d
+          item_prototypes:
+            - uuid: cabcc27add94441f8fa6a9312bb0c381
+              name: '{#ORG} / {#DEVICE}: status'
+              type: TRAP
+              key: 'zabbcomm.device.status[{#ORGID},{#DEVICEID}]'
+              valuemap:
+                name: 'zabbcomm status'
+              tags:
+                - tag: component
+                  value: device
+                - tag: organization
+                  value: '{#ORG}'
+                - tag: device
+                  value: '{#DEVICE}'
+              trigger_prototypes:
+                - uuid: 7bfbb3b172f74f558cab9965431be5f2
+                  expression: 'last(/zabbcomm by trapper/zabbcomm.device.status[{#ORGID},{#DEVICEID}])=0'
+                  name: '{#ORG} / {#DEVICE}: endpoint offline'
+                  priority: WARNING
+                  dependencies:
+                    - name: 'zabbcomm connector not reporting'
+                      expression: 'nodata(/zabbcomm by trapper/zabbcomm.alive,{$ZABBCOMM.ALIVE.NODATA})=1'
+                  tags:
+                    - tag: scope
+                      value: availability
+            - uuid: 569b14493ae94c84a7d68983f476b626
+              name: '{#ORG} / {#DEVICE}: WAN IP'
+              type: TRAP
+              key: 'zabbcomm.device.wan_ip[{#ORGID},{#DEVICEID}]'
+              value_type: CHAR
+              preprocessing:
+                - type: DISCARD_UNCHANGED_HEARTBEAT
+                  parameters:
+                    - 1h
+              tags:
+                - tag: component
+                  value: device
+                - tag: organization
+                  value: '{#ORG}'
+                - tag: device
+                  value: '{#DEVICE}'
+            - uuid: 9c6d7b2b26d74ae9b37ef6dd8199e30c
+              name: '{#ORG} / {#DEVICE}: last check-in'
+              type: TRAP
+              key: 'zabbcomm.device.last_checkin[{#ORGID},{#DEVICEID}]'
+              units: unixtime
+              preprocessing:
+                - type: DISCARD_UNCHANGED_HEARTBEAT
+                  parameters:
+                    - 1h
+              tags:
+                - tag: component
+                  value: device
+                - tag: organization
+                  value: '{#ORG}'
+                - tag: device
+                  value: '{#DEVICE}'
+      macros:
+        - macro: '{$ZABBCOMM.ALIVE.NODATA}'
+          value: 5m
+          description: 'How long without a connector heartbeat before alerting.'
+        - macro: '{$ZABBCOMM.STATUS.NODATA}'
+          value: 45m
+          description: 'Missing organization or site status window. Keep it longer than the connector DEVICE_TIMEOUT (35m), because offline statuses are withheld for that long after the connector restarts.'
+      valuemaps:
+        - uuid: e103e99ab3a443179bfb95620387f426
+          name: 'zabbcomm status'
+          mappings:
+            - value: '0'
+              newvalue: Offline
+            - value: '1'
+              newvalue: Online
+            - value: '2'
+              newvalue: 'Offline (covered by a higher-level alert)'

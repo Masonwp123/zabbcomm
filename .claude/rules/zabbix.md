@@ -32,13 +32,16 @@ paths:
 | `zabbcomm.org.status[{#ORGID}]` | trapper, int | `1` = some device online ("org OK" heartbeat), `0` = all devices stale |
 | `zabbcomm.org.devices.online[{#ORGID}]` | trapper, int | count |
 | `zabbcomm.org.devices.total[{#ORGID}]` | trapper, int | count |
+| `zabbcomm.org.last_checkin[{#ORGID}]` | trapper, int | Unix time of the latest check-in from any device in the org |
 | `zabbcomm.site.discovery` | trapper LLD rule | `[{"{#ORGID}", "{#ORG}", "{#SITEID}", "{#SITE}"}]`. Only WAN IPs with at least `SITE_MIN_DEVICES` members |
 | `zabbcomm.site.status[{#ORGID},{#SITEID}]` | trapper, int | `1` = some member online, `0` = all members stale while the org is up, `2` = all stale because the org is down (suppressed) |
 | `zabbcomm.site.devices.online[{#ORGID},{#SITEID}]` | trapper, int | count |
 | `zabbcomm.site.devices.total[{#ORGID},{#SITEID}]` | trapper, int | count |
+| `zabbcomm.site.last_checkin[{#ORGID},{#SITEID}]` | trapper, int | Unix time of the latest check-in from any device at the site |
 | `zabbcomm.device.discovery` | trapper LLD rule | `[{"{#ORGID}", "{#ORG}", "{#DEVICEID}", "{#DEVICE}"}]` |
 | `zabbcomm.device.status[{#ORGID},{#DEVICEID}]` | trapper, int | `1` online, `0` offline (isolated within its site, or within the org if unsited), `2` offline because its site or org is down (suppressed) |
 | `zabbcomm.device.wan_ip[{#ORGID},{#DEVICEID}]` | trapper, text | Last WAN IP seen. Informational, and useful when triaging |
+| `zabbcomm.device.last_checkin[{#ORGID},{#DEVICEID}]` | trapper, int | Unix time of the device's latest check-in (template units `unixtime`). Sent during the startup grace period too |
 
 - Device items are keyed by device only, not by site. A device moving between sites (a
   laptop, or an ISP IP change) keeps its item history.
@@ -49,7 +52,7 @@ paths:
 - **Item keys use slug IDs only.** Display names (`{#ORG}`, `{#DEVICE}`) go in item and
   trigger *names*. Slugs never need key-parameter quoting, and display names can contain
   commas, quotes and brackets.
-- In the template, give the count and `wan_ip` items the preprocessing step **"Discard
+- In the template, give the count, `last_checkin` and `wan_ip` items the preprocessing step **"Discard
   unchanged with heartbeat"** (heartbeat 1h). The app resends every value each cycle
   (`EVAL_INTERVAL`), and this keeps history small. Status items can use it too, as long
   as the heartbeat is shorter than any `nodata()` window on them.
@@ -62,13 +65,22 @@ paths:
 
 ## Trigger design (lives in the template, not in Python)
 
-- `nodata(/zabbcomm/zabbcomm.alive,5m)=1`: "zabbcomm connector not reporting" (High).
+Expressions below are shortened. In the template, each one is written against the
+template name, e.g. `nodata(/zabbcomm by trapper/zabbcomm.alive,5m)=1`.
+
+- `nodata(/zabbcomm by trapper/zabbcomm.alive,5m)=1`: "zabbcomm connector not
+  reporting" (High).
   Every org and device trigger **depends on this one**, so a dead connector doesn't page
   for every client.
 - `last(org.status)=0`: "{#ORG}: all endpoints offline (internet or power outage)" (High).
-- `nodata(org.status,15m)=1`: "{#ORG}: no status data" (Average). Catches an org that
+- `nodata(org.status,45m)=1`: "{#ORG}: no status data" (Average). Catches an org that
   never re-registered.
-- `last(site.status)=0 and nodata(site.status,15m)=0`: "{#ORG} / site {#SITE}: all
+- The windows are template macros: `{$ZABBCOMM.ALIVE.NODATA}` (5m) and
+  `{$ZABBCOMM.STATUS.NODATA}` (45m, org and site triggers). **The status window must
+  stay longer than `DEVICE_TIMEOUT`** (35m). During the startup grace period offline
+  statuses are withheld, so a shorter window would raise "no status data" and resolve
+  site alerts during every connector restart.
+- `last(site.status)=0 and nodata(site.status,45m)=0`: "{#ORG} / site {#SITE}: all
   endpoints offline" (High). The `nodata` term matters. When a site is retired because
   its devices moved to a new IP, the app stops sending for it. The trigger then resolves
   by itself instead of staying stuck on the last `0` until LLD deletes the item. Sites
@@ -79,8 +91,8 @@ paths:
 
 ## Template file (`zabbix/zabbcomm_template.yaml`)
 
-- Store it as a Zabbix YAML export. Confirm the target server version first, because
-  the export's `version:` must not be newer than the server.
+- Store it as a Zabbix YAML export. The target server is **Zabbix 7.4**. The export's
+  `version:` must not be newer than the server.
 - Every template, item, prototype and trigger needs a stable 32-hex-char `uuid`. Create
   new ones only for new entities, and **never change an existing UUID**.
 - The keys in the template must match the constants in the "Zabbix payloads" section of

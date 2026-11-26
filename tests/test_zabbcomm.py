@@ -46,15 +46,25 @@ class FakeSender:
         self.calls: list[list[tuple[str, str]]] = []
         self.fail_with: Exception | None = None
         self.rejected = 0
+        self.rejected_rules = 0
 
     async def send(self, host: str, values: list[tuple[str, str]], clock: int) -> z.SendResult:
         if self.fail_with:
             raise self.fail_with
         self.calls.append(values)
-        return z.SendResult(len(values) - self.rejected, self.rejected)
+        failed = self.rejected_rules if is_discovery(values) else self.rejected
+        return z.SendResult(len(values) - failed, failed)
 
     def last(self) -> dict[str, str]:
-        return dict(self.calls[-1])
+        """The latest values batch."""
+        return dict(next(c for c in reversed(self.calls) if not is_discovery(c)))
+
+    def discoveries(self) -> list[dict[str, str]]:
+        return [dict(c) for c in self.calls if is_discovery(c)]
+
+
+def is_discovery(values: list[tuple[str, str]]) -> bool:
+    return any(key.endswith(".discovery") for key, _ in values)
 
 
 # ------------------------------------------------------------------- IDs and sites
@@ -164,6 +174,16 @@ def test_org_display_name_is_latest_seen() -> None:
     assert ev.orgs[0].org_name == "ACME, Inc."
 
 
+def test_last_checkin_is_latest_per_org_site_and_device() -> None:
+    ev = run_eval(
+        [dev("Acme", "a", 600, HQ), dev("Acme", "b", 3000, HQ), dev("Acme", "lt", 60, HOME)]
+    )
+    values = dict(z.build_values(ev, in_grace=True))  # sent even during the grace period
+    assert values[z.org_key("last_checkin", "acme")] == str(int(NOW - 60))
+    assert values[z.site_key("last_checkin", "acme", "203-0-113-10")] == str(int(NOW - 600))
+    assert values[z.device_key("last_checkin", "acme", "b")] == str(int(NOW - 3000))
+
+
 # ----------------------------------------------------------------- Zabbix payloads
 
 
@@ -203,18 +223,37 @@ async def test_discovery_sent_first_then_only_on_change_or_interval(tmp_path: Pa
     monitor.registry.check_in("Acme", "a", HQ, None, NOW)
 
     await monitor.run_cycle(NOW)
-    keys = [k for k, _ in sender.calls[-1]]
-    assert keys[:3] == [z.KEY_ORG_DISCOVERY, z.KEY_SITE_DISCOVERY, z.KEY_DEVICE_DISCOVERY]
+    keys = [k for k, _ in sender.calls[0]]
+    assert keys == [z.KEY_ORG_DISCOVERY, z.KEY_SITE_DISCOVERY, z.KEY_DEVICE_DISCOVERY]
+    assert z.KEY_ALIVE in dict(sender.calls[1])
 
     await monitor.run_cycle(NOW + 60)
-    assert z.KEY_ORG_DISCOVERY not in sender.last()
+    assert len(sender.discoveries()) == 1
 
     monitor.registry.check_in("Acme", "b", HQ, None, NOW + 100)
     await monitor.run_cycle(NOW + 120)
-    assert z.KEY_DEVICE_DISCOVERY in sender.last()
+    assert len(sender.discoveries()) == 2
 
     await monitor.run_cycle(NOW + 120 + 3600)
-    assert z.KEY_ORG_DISCOVERY in sender.last()
+    assert len(sender.discoveries()) == 3
+
+
+@pytest.mark.anyio
+async def test_rejected_discovery_is_resent_until_accepted(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    monitor, sender = make_monitor(tmp_path)
+    monitor.registry.check_in("Acme", "a", HQ, None, NOW)
+    sender.rejected_rules = 3  # e.g. the host or template isn't set up yet
+    await monitor.run_cycle(NOW)
+    await monitor.run_cycle(NOW + 60)
+    assert len(sender.discoveries()) == 2
+    assert "rejected 3 of 3 discovery rules" in caplog.text
+
+    sender.rejected_rules = 0
+    await monitor.run_cycle(NOW + 120)
+    await monitor.run_cycle(NOW + 180)
+    assert len(sender.discoveries()) == 3
 
 
 @pytest.mark.anyio
@@ -229,7 +268,7 @@ async def test_sender_failure_is_logged_and_discovery_retried(
 
     sender.fail_with = None
     await monitor.run_cycle(NOW + 60)
-    assert z.KEY_ORG_DISCOVERY in sender.last()
+    assert z.KEY_ORG_DISCOVERY in sender.discoveries()[-1]
 
 
 @pytest.mark.anyio
@@ -277,7 +316,7 @@ async def test_forgotten_devices_leave_registry_and_discovery(tmp_path: Path) ->
     monitor.registry.replace_all([dev("Acme", "old", 90000), dev("Acme", "new", 60)])
     await monitor.run_cycle(NOW)
     assert [d.device_id for d in monitor.registry.devices()] == ["new"]
-    devices = json.loads(sender.last()[z.KEY_DEVICE_DISCOVERY])
+    devices = json.loads(sender.discoveries()[-1][z.KEY_DEVICE_DISCOVERY])
     assert [r["{#DEVICEID}"] for r in devices] == ["new"]
 
 
@@ -391,10 +430,10 @@ async def test_token_never_logged(tmp_path: Path, caplog: pytest.LogCaptureFixtu
 
 
 @pytest.mark.anyio
-async def test_healthz_and_no_public_docs(tmp_path: Path) -> None:
+async def test_health_and_no_public_docs(tmp_path: Path) -> None:
     app = z.create_app(make_settings(tmp_path), sender=FakeSender())
     async with client_for(app) as c:
-        assert (await c.get("/healthz")).json() == {"status": "ok"}
+        assert (await c.get("/v1/health")).json() == {"status": "ok"}
         assert (await c.get("/docs")).status_code == 404
         assert (await c.get("/openapi.json")).status_code == 404
 
@@ -413,6 +452,29 @@ async def test_forwarded_ip_from_trusted_proxy_is_recorded(tmp_path: Path) -> No
 
 
 # --------------------------------------------------------------------------- config
+
+
+@pytest.mark.parametrize(
+    "server", ["zabbix.example.com", "10.0.0.5", "host.docker.internal", " zabbix_server "]
+)
+def test_zabbix_server_accepts_bare_hosts(tmp_path: Path, server: str) -> None:
+    settings = make_settings(tmp_path, zabbix_server=server)
+    z.ZabbixSender(settings.zabbix_server, settings.zabbix_port)  # must not raise
+
+
+@pytest.mark.parametrize(
+    "server",
+    [
+        "",
+        "zabbix.example.com:10051",
+        "http://zabbix.example.com",
+        "zabbix.example.com/zabbix",
+        "2001:db8::1",
+    ],
+)
+def test_zabbix_server_rejects_urls_and_ports(tmp_path: Path, server: str) -> None:
+    with pytest.raises(ValueError, match="just a hostname"):
+        make_settings(tmp_path, zabbix_server=server)
 
 
 def test_load_settings_error_does_not_echo_token(

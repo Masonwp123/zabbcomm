@@ -22,9 +22,9 @@ Syncro policy script        --->  POST {APP_URL}/api/v1/checkin
 ```
 
 1. A Syncro policy runs `scripts/Send-ZabbcommCheckin.ps1` on client devices **every 15
-   minutes**. It gets the org name from a **Syncro platform variable** (the customer
-   name) and POSTs it with the device name (`$env:COMPUTERNAME`) to `APP_URL`. It
-   **installs nothing on the client**: no scheduled tasks, no files. See
+   minutes**. It gets the org name (`$orgName`) and device name (`$assetName`) from
+   **Syncro platform variables** and POSTs them to `APP_URL`. It **installs nothing on
+   the client**: no scheduled tasks, no files. See
    `.claude/rules/powershell-syncro.md`.
 2. For each `(org, device)` the app stores `last_seen` and `last_ip`, the WAN IP that
    check-in arrived from. It keeps them in memory and writes them to disk regularly
@@ -71,9 +71,10 @@ escalation, maintenance windows, business hours). Don't put alert policy in Pyth
 
 ## Status
 
-- **Done:** the Python connector. Tests are in `tests/test_zabbcomm.py`.
-- **Not written yet:** `scripts/Send-ZabbcommCheckin.ps1` and
+- **Done:** the Python connector (tests in `tests/test_zabbcomm.py`), the endpoint
+  script `scripts/Send-ZabbcommCheckin.ps1`, and the Zabbix 7.4 template
   `zabbix/zabbcomm_template.yaml`.
+- **Not yet verified:** importing the template into a real Zabbix server.
 
 ## Layout
 
@@ -148,7 +149,7 @@ Dockerfile
   site in two. IPv6 sources are still accepted and grouped by `/SITE_IPV6_PREFIX`.
 - The check-in handler only touches the registry. It **never awaits Zabbix**.
 
-`GET /healthz` returns `200 {"status": "ok"}` and is unauthenticated, for Docker or a load
+`GET /v1/health` returns `200 {"status": "ok"}` and is unauthenticated, for Docker or a load
 balancer. It must not expose org or device data.
 
 ## Configuration (env vars, read by `Settings`)
@@ -162,7 +163,7 @@ Keep this table, `Settings` and `.env.example` in step. `compose.yaml` pins `HOS
 | `APP_URL` | none | Public base URL that endpoints post to. Documentation and script only; not used for binding |
 | `HOST` / `PORT` | `0.0.0.0` / `8000` | uvicorn bind address |
 | `API_TOKEN` | **required**, at least 16 chars | Shared bearer token that endpoints send |
-| `ZABBIX_SERVER` | **required** | Zabbix server or proxy address for sender data |
+| `ZABBIX_SERVER` | **required** | Zabbix server or proxy for sender data. Bare hostname or IPv4 only: no scheme, port, path or IPv6 literal (`zabbix_utils` can't parse them) |
 | `ZABBIX_PORT` | `10051` | Trapper port |
 | `ZABBIX_HOST` | `zabbcomm` | Zabbix host (template linked) that owns all items |
 | `ZABBIX_DRY_RUN` | `false` | Log the payloads instead of sending them (local development) |
@@ -190,9 +191,11 @@ Keep this table, `Settings` and `.env.example` in step. `compose.yaml` pins `HOS
   store and is a design change.
 - **Zabbix failures never break check-ins.** Log sender errors and retry on the next
   cycle. A Zabbix outage must not crash the evaluator loop: catch, log, continue.
-- **Batch, don't stream.** Send one batch per cycle, never one request per check-in.
-  `zabbix_utils` sends it in chunks of 250, in order. Discovery goes at the front of
-  the batch.
+- **Batch, don't stream.** Send values in one batch per cycle, never one request per
+  check-in. `zabbix_utils` sends it in chunks of 250, in order.
+- **Discovery is its own request, sent before the values.** Zabbix replies only with
+  counts, so this is how we know it was accepted. Discovery with any rejected rule
+  stays pending and is resent every cycle until accepted.
 - **Config errors must not echo values.** `load_settings()` formats validation errors
   without their inputs, because a too-short `API_TOKEN` would otherwise be printed.
 - **Startup grace period.** For `DEVICE_TIMEOUT` seconds after startup, send only
@@ -236,6 +239,8 @@ Keep this table, `Settings` and `.env.example` in step. `compose.yaml` pins `HOS
 - **A Syncro customer rename** makes a new org appear on the next run while the old
   one goes silent until it's forgotten. Expect one false "all endpoints offline"
   alert per rename.
+- **A Syncro asset rename** likewise registers a new device, and the old name reports
+  "endpoint offline" until it's forgotten.
 - **Forgetting removes alerts.** After `DEVICE_FORGET_AFTER`, an org that stays down
   drops out of discovery, and Zabbix removes its items once the LLD "lost resources"
   period passes.

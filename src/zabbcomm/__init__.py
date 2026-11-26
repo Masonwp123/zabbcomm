@@ -45,6 +45,8 @@ log = logging.getLogger("zabbcomm")
 
 # --------------------------------------------------------------------------- settings
 
+_HOSTNAME = re.compile(r"[A-Za-z0-9._-]+")
+
 
 class Settings(BaseSettings):
     """Configuration from environment variables (see .claude/CLAUDE.md for meanings)."""
@@ -70,6 +72,18 @@ class Settings(BaseSettings):
     max_devices_per_org: int = Field(1000, ge=1)
     data_dir: Path = Path("/app/data")
     log_level: Literal["DEBUG", "INFO", "WARNING", "ERROR"] = "INFO"
+
+    @field_validator("zabbix_server")
+    @classmethod
+    def _bare_host(cls, value: str) -> str:
+        # zabbix_utils splits "server:port" on ":", so any other colon crashes it.
+        value = value.strip()
+        if not _HOSTNAME.fullmatch(value):
+            raise ValueError(
+                "must be just a hostname or IPv4 address, without http://, a port "
+                "(use ZABBIX_PORT) or a path"
+            )
+        return value
 
     @field_validator("log_level", mode="before")
     @classmethod
@@ -210,6 +224,7 @@ class OrgStatus:
     status: int
     online: int
     total: int
+    last_checkin: float
 
 
 @dataclass(frozen=True)
@@ -221,6 +236,7 @@ class SiteStatus:
     status: int
     online: int
     total: int
+    last_checkin: float
 
 
 @dataclass(frozen=True)
@@ -231,6 +247,7 @@ class DeviceStatus:
     device_name: str
     status: int
     wan_ip: str | None
+    last_checkin: float
 
 
 @dataclass(frozen=True)
@@ -258,11 +275,19 @@ def evaluate(
     sites: list[SiteStatus] = []
     statuses: list[DeviceStatus] = []
     for org_id, members in sorted(by_org.items()):
-        org_name = max(members, key=lambda d: d.last_seen).org_name
+        latest = max(members, key=lambda d: d.last_seen)
+        org_name = latest.org_name
         online = {d.device_id for d in members if now - d.last_seen <= device_timeout}
         org_up = bool(online)
         orgs.append(
-            OrgStatus(org_id, org_name, ONLINE if org_up else OFFLINE, len(online), len(members))
+            OrgStatus(
+                org_id,
+                org_name,
+                ONLINE if org_up else OFFLINE,
+                len(online),
+                len(members),
+                latest.last_seen,
+            )
         )
 
         # A device belongs to the site of its latest WAN IP; small groups stay unsited.
@@ -288,6 +313,7 @@ def evaluate(
                     site_status,
                     site_online,
                     len(site_members),
+                    max(d.last_seen for d in site_members),
                 )
             )
             for d in site_members:
@@ -299,7 +325,15 @@ def evaluate(
             else:
                 device_status = OFFLINE if parent_up.get(d.device_id, org_up) else SUPPRESSED
             statuses.append(
-                DeviceStatus(org_id, org_name, d.device_id, d.device_name, device_status, d.last_ip)
+                DeviceStatus(
+                    org_id,
+                    org_name,
+                    d.device_id,
+                    d.device_name,
+                    device_status,
+                    d.last_ip,
+                    d.last_seen,
+                )
             )
 
     return Evaluation(tuple(orgs), tuple(sites), tuple(statuses))
@@ -373,12 +407,16 @@ def build_values(ev: Evaluation, *, in_grace: bool) -> list[tuple[str, str]]:
         add_status(org_key("status", o.org_id), o.status)
         values.append((org_key("devices.online", o.org_id), str(o.online)))
         values.append((org_key("devices.total", o.org_id), str(o.total)))
+        values.append((org_key("last_checkin", o.org_id), str(int(o.last_checkin))))
     for s in ev.sites:
         add_status(site_key("status", s.org_id, s.site_id), s.status)
         values.append((site_key("devices.online", s.org_id, s.site_id), str(s.online)))
         values.append((site_key("devices.total", s.org_id, s.site_id), str(s.total)))
+        values.append((site_key("last_checkin", s.org_id, s.site_id), str(int(s.last_checkin))))
     for d in ev.devices:
         add_status(device_key("status", d.org_id, d.device_id), d.status)
+        last_checkin = str(int(d.last_checkin))
+        values.append((device_key("last_checkin", d.org_id, d.device_id), last_checkin))
         if d.wan_ip:
             values.append((device_key("wan_ip", d.org_id, d.device_id), d.wan_ip))
     return values
@@ -482,7 +520,8 @@ class Monitor:
         self.sender = sender
         self.store = store
         self.started_at = started_at
-        self._sent_discovery: dict[str, str] = {}
+        self._discovery: dict[str, str] = {}
+        self._discovery_pending = False  # True until Zabbix has accepted the latest version
         self._discovery_sent_at = float("-inf")
         self._discovery_changed_at = float("-inf")
 
@@ -499,34 +538,18 @@ class Monitor:
             ipv6_prefix=s.site_ipv6_prefix,
         )
         discovery = build_discovery(ev)
-        changed = discovery != self._sent_discovery
-        if changed:
-            self._discovery_changed_at = now
-        resend = changed or now - self._discovery_sent_at >= s.discovery_interval
-
-        # Discovery goes first so Zabbix sees new entities before (or with) their values.
-        values = list(discovery.items()) if resend else []
-        values += build_values(ev, in_grace=now - self.started_at < s.device_timeout)
+        if discovery != self._discovery:
+            self._discovery, self._discovery_changed_at = discovery, now
+            self._discovery_pending = True
+        values = build_values(ev, in_grace=now - self.started_at < s.device_timeout)
 
         try:
-            result = await self.sender.send(s.zabbix_host, values, int(now))
+            # Discovery goes first so Zabbix sees new entities before their values.
+            if self._discovery_pending or now - self._discovery_sent_at >= s.discovery_interval:
+                await self._send_discovery(now)
+            await self._send_values(values, now)
         except Exception:
-            log.exception("sending %d values to Zabbix failed; retrying next cycle", len(values))
-        else:
-            if resend:
-                self._sent_discovery, self._discovery_sent_at = discovery, now
-            if result.failed:
-                recent = now - self._discovery_changed_at < NEW_ITEM_GRACE
-                log.log(
-                    logging.DEBUG if recent else logging.WARNING,
-                    "Zabbix rejected %d of %d values. %s",
-                    result.failed,
-                    len(values),
-                    "Expected briefly after new discovery."
-                    if recent
-                    else f"Check the zabbcomm template is linked to host {s.zabbix_host!r} "
-                    "and trapper 'Allowed hosts' permits this connector.",
-                )
+            log.exception("sending to Zabbix failed; retrying next cycle")
 
         if self.store is not None:
             snapshot = [asdict(d) for d in self.registry.devices()]
@@ -534,6 +557,40 @@ class Monitor:
                 await asyncio.to_thread(self.store.save, snapshot)
             except OSError:
                 log.exception("saving snapshot to %s failed", self.store.path)
+
+    async def _send_discovery(self, now: float) -> None:
+        """Send discovery on its own: Zabbix only reports counts, so this is the only way
+        to know whether it was accepted. Rejected discovery stays pending."""
+        host = self.settings.zabbix_host
+        rules = list(self._discovery.items())
+        result = await self.sender.send(host, rules, int(now))
+        self._discovery_pending = result.failed > 0
+        if result.failed:
+            log.warning(
+                "Zabbix rejected %d of %d discovery rules; retrying next cycle. Check host %r "
+                "exists, has the zabbcomm template linked, and allows this connector.",
+                result.failed,
+                len(rules),
+                host,
+            )
+        else:
+            self._discovery_sent_at = now
+
+    async def _send_values(self, values: list[tuple[str, str]], now: float) -> None:
+        result = await self.sender.send(self.settings.zabbix_host, values, int(now))
+        if not result.failed:
+            return
+        recent = now - self._discovery_changed_at < NEW_ITEM_GRACE
+        log.log(
+            logging.DEBUG if recent else logging.WARNING,
+            "Zabbix rejected %d of %d values. %s",
+            result.failed,
+            len(values),
+            "Expected briefly after new discovery."
+            if recent
+            else "Check the discovered items exist on the Zabbix host (see the discovery "
+            "rules' Info column) and trapper 'Allowed hosts' permits this connector.",
+        )
 
     async def run_forever(self, clock: Callable[[], float]) -> None:
         while True:
@@ -652,8 +709,8 @@ def create_app(
             raise HTTPException(status.HTTP_403_FORBIDDEN, "registration limit reached") from None
         return Response(status_code=status.HTTP_204_NO_CONTENT)
 
-    @app.get("/healthz")
-    async def healthz() -> dict[str, str]:
+    @app.get("/v1/health")
+    async def health() -> dict[str, str]:
         return {"status": "ok"}
 
     return app

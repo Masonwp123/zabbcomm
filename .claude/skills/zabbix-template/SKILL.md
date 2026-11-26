@@ -14,11 +14,14 @@ responses) and alerts stop firing.
    `.claude/rules/zabbix.md`. If the code and the rules file disagree, stop and ask
    which one is right.
 
-2. **Confirm the Zabbix server version** with the user if it isn't already recorded in
-   the template. The export's `version:` field must not be newer than the server.
+2. **Check the Zabbix server version.** It's 7.4, as recorded in the template. The
+   export's `version:` field must not be newer than the server.
 
 3. **Edit `zabbix/zabbcomm_template.yaml`:**
-   - Template name `zabbcomm`, linked to host `ZABBIX_HOST`.
+   - Template name `zabbcomm by trapper`, linked to host `ZABBIX_HOST` (default
+     `zabbcomm`). Templates and hosts share one namespace in Zabbix, so the template
+     can't also be called `zabbcomm`. Trigger expressions in the template reference the
+     template name, e.g. `last(/zabbcomm by trapper/zabbcomm.org.status[{#ORGID}])=0`.
    - `zabbcomm.alive`: a plain trapper item with its `nodata` trigger.
    - Three LLD rules of type Zabbix trapper (`zabbcomm.org.discovery`,
      `zabbcomm.site.discovery`, `zabbcomm.device.discovery`), each with item prototypes
@@ -35,7 +38,7 @@ responses) and alerts stop firing.
    rather than grepping it:
 
    ```bash
-   uv run python -c "import zabbcomm as z; d=[z.Device('o',i,'O',i,0,'203.0.113.1') for i in 'ab']; ev=z.evaluate(d,0,device_timeout=1,site_min_devices=2,ipv6_prefix=64); print(chr(10).join(sorted({k.split('[')[0] for k,_ in z.build_values(ev,in_grace=False)}|set(z.build_discovery(ev)))))" > /tmp/code_keys
+   uv run python -c "import zabbcomm as z; d=[z.Device('o',i,'O',i,0,'203.0.113.1') for i in 'ab']; ev=z.evaluate(d,0,device_timeout=1,site_min_devices=2,ipv6_prefix=64); print(chr(10).join(sorted({k.split('[')[0] for k,_ in z.build_values(ev,in_grace=False)}|set(z.build_discovery(ev)))))" | tr -d '\r' > /tmp/code_keys
    grep -oE 'zabbcomm\.[a-z_.]+[a-z_]' zabbix/zabbcomm_template.yaml | sort -u > /tmp/tpl_keys
    diff /tmp/code_keys /tmp/tpl_keys
    ```
