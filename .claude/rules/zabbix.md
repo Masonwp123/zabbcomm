@@ -33,7 +33,7 @@ paths:
 | `zabbcomm.org.devices.online[{#ORGID}]` | trapper, int | count |
 | `zabbcomm.org.devices.total[{#ORGID}]` | trapper, int | count |
 | `zabbcomm.org.last_checkin[{#ORGID}]` | trapper, int | Unix time of the latest check-in from any device in the org |
-| `zabbcomm.site.discovery` | trapper LLD rule | `[{"{#ORGID}", "{#ORG}", "{#SITEID}", "{#SITE}"}]`. Only WAN IPs with at least `SITE_MIN_DEVICES` members |
+| `zabbcomm.site.discovery` | trapper LLD rule | `[{"{#ORGID}", "{#ORG}", "{#SITEID}", "{#SITE}"}]`. Only WAN IPs with a server or at least `SITE_MIN_DEVICES` members |
 | `zabbcomm.site.status[{#ORGID},{#SITEID}]` | trapper, int | `1` = some member online, `0` = all members stale while the org is up, `2` = all stale because the org is down (suppressed) |
 | `zabbcomm.site.devices.online[{#ORGID},{#SITEID}]` | trapper, int | count |
 | `zabbcomm.site.devices.total[{#ORGID},{#SITEID}]` | trapper, int | count |
@@ -43,6 +43,9 @@ paths:
 | `zabbcomm.device.wan_ip[{#ORGID},{#DEVICEID}]` | trapper, text | Last WAN IP seen. Informational, and useful when triaging |
 | `zabbcomm.device.last_checkin[{#ORGID},{#DEVICEID}]` | trapper, int | Unix time of the device's latest check-in (template units `unixtime`). Sent during the startup grace period too |
 
+- A `status` value is sometimes deliberately **not sent** (`PENDING`, see CLAUDE.md
+  "Staggered check-ins"), so Zabbix keeps the previous one. Don't add a `nodata()`
+  trigger on site or device status shorter than the status window.
 - Device items are keyed by device only, not by site. A device moving between sites (a
   laptop, or an ISP IP change) keeps its item history.
 - `site_id` is the slug of the IP. For example `203.0.113.7` becomes `203-0-113-7`, and
@@ -96,5 +99,5 @@ template name, e.g. `nodata(/zabbcomm by trapper/zabbcomm.alive,5m)=1`.
 - Every template, item, prototype and trigger needs a stable 32-hex-char `uuid`. Create
   new ones only for new entities, and **never change an existing UUID**.
 - The keys in the template must match the constants in the "Zabbix payloads" section of
-  `src/zabbcomm/__init__.py` exactly. Use the
+  `../../src/zabbcomm/__main__.py` exactly. Use the
   `zabbix-template` skill when editing.

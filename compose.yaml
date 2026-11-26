@@ -4,10 +4,16 @@ services:
     build: .
     restart: unless-stopped
     environment:
+      # Should have read permissions to the library and rw to config and cache
+      PUID: 1000
+      PGID: 1000
+
       APP_URL: ${APP_URL}
       API_TOKEN: ${API_TOKEN}
+
       ZABBIX_SERVER: ${ZABBIX_SERVER}
       ZABBIX_PORT: 10051
+
       # Name of the Zabbix host that has the zabbcomm template linked.
       ZABBIX_HOST: "zabbcomm"
       # true = log the values instead of sending them (for testing).
@@ -15,16 +21,18 @@ services:
 
       # How often Syncro runs the check-in script.
       CHECKIN_INTERVAL: 900
-      # Silence after which a device counts as offline. Keep at least 2x CHECKIN_INTERVAL.
+      # Silence after which a device counts as offline. Must be more than twice
+      # CHECKIN_INTERVAL. Raise it if check-ins often run several minutes late.
       DEVICE_TIMEOUT: 2100
       # How often status is evaluated and sent to Zabbix.
       EVAL_INTERVAL: 60
       # How often the full discovery data is resent.
       DISCOVERY_INTERVAL: 3600
-      # Silence after which a device is removed entirely (7 days).
+      # Silence after which a device is removed entirely (7 days). At least twice
+      # DEVICE_TIMEOUT.
       DEVICE_FORGET_AFTER: 604800
 
-      # Devices that must share a public IP before it counts as a site.
+      # Devices that must share a public IP before it counts as a site (one server is enough).
       SITE_MIN_DEVICES: 2
       SITE_IPV6_PREFIX: 64
       MAX_ORGS: 500
@@ -32,7 +40,18 @@ services:
 
       # DEBUG, INFO, WARNING or ERROR
       LOG_LEVEL: INFO
+
+      # The app serves plain HTTP, so only this machine can reach it by default: put a
+      # TLS reverse proxy in front. If the proxy runs on another machine, set
+      # PUBLISH_ADDRESS in .env to this machine's address on a trusted network.
+      PUBLISH_ADDRESS: 127.0.0.1
+
+      # IP address or CIDR of the reverse proxy, as this container sees it. A proxy on
+      # the Docker host usually appears as the network's gateway (e.g. 172.18.0.1).
+      # If this is wrong, every device seems to share the proxy's address and sites
+      # can't be told apart. Never use * if clients can reach the app directly.
+      FORWARDED_ALLOW_IPS: ${FORWARDED_ALLOW_IPS:-127.0.0.1}
     ports:
-      - "8000:8000"
+      - "${PUBLISH_ADDRESS:-127.0.0.1}:8000:8000"
     volumes:
-      - ./docker/data:/app/data
+      - ./docker/data:/data

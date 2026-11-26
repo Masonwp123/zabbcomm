@@ -23,6 +23,7 @@ to be boring, quiet and short.
 |---|---|---|
 | `$orgName` | platform variable | Organization (customer) name, sent as `org` |
 | `$assetName` | platform variable | Asset name, sent as `device` |
+| `$deviceType` | dropdown variable, set per policy (servers have their own policy) | `server` or `user`, sent as `is_server` |
 | `$appUrl` | script variable | zabbcomm base URL |
 | `$apiToken` | script variable | The app's `API_TOKEN` |
 
@@ -40,8 +41,14 @@ to be boring, quiet and short.
   check-in. Use `-MaximumRedirection 0` and `-TimeoutSec 15`.
 - **Send the JSON body as UTF-8 bytes.** Windows PowerShell 5.1 mangles non-ASCII names
   in a string body.
-- The body matches the API contract in `.claude/CLAUDE.md`: `org`, `device` and
-  `agent_version`.
+- The body matches the API contract in `.claude/CLAUDE.md`: `org`, `device`,
+  `agent_version` and `is_server`.
+- `is_server` comes **only from `$deviceType`** (`server` → true, `user` → false,
+  case-insensitive). Don't detect it from the operating system: some clients' servers
+  don't run Windows Server, and the Syncro policy is the source of truth.
+- **A missing or invalid `$deviceType` must not block the check-in**, or a policy mistake
+  would make every device in it look offline. Omit `is_server` (the app keeps its stored
+  value), check in, then exit `1`. An undelivered check-in still exits `0`.
 - **Don't look up or send the WAN IP.** The server reads it from the connection's source
   address. A "what's my IP" lookup would add a third-party dependency that fails during
   outages, and could disagree with the path actually used.

@@ -6,34 +6,40 @@ LABEL description="Receive device heartbeats and create zabbix items"
 ENV PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1 \
     PYTHON_COLORS=0 \
+    UV_COMPILE_BYTECODE=1 \
     UV_LINK_MODE=copy \
-    UV_NO_CACHE=1 \
     UV_PYTHON_DOWNLOADS=never \
-    UV_PYTHON=/usr/local/bin/python3
+    PATH="/app/.venv/bin:$PATH"
 
 WORKDIR /app
 
-# Install locked dependencies first so this layer is cached across source changes.
-# uv is mounted only for the build step, so it doesn't end up in the final image.
+# Add required packages, util-linux is for permissions
+RUN apk update && apk upgrade --no-cache && \
+    apk add --no-cache \
+    util-linux
+
+# uv installs exactly the versions in uv.lock, so every build of a commit gets the same dependencies
+COPY --from=ghcr.io/astral-sh/uv:0.13.8 /uv /usr/local/bin/uv
+
+# Dependencies first: this layer is reused as long as uv.lock does not change
 COPY pyproject.toml uv.lock ./
-RUN --mount=from=ghcr.io/astral-sh/uv:0.13.8,source=/uv,target=/bin/uv \
-    uv sync --locked --no-dev --no-install-project
+RUN uv sync --locked --no-dev --no-install-project --no-cache
 
-# README.md is named in pyproject.toml, so building the project needs it.
-COPY README.md ./
+# Then the application itself
 COPY src ./src
-RUN --mount=from=ghcr.io/astral-sh/uv:0.13.8,source=/uv,target=/bin/uv \
-    uv sync --locked --no-dev --no-editable
+RUN uv sync --locked --no-dev --no-editable --no-cache
 
-# Registry snapshot location. A new named volume mounted here inherits this ownership,
-# which lets the unprivileged user write to it.
-RUN mkdir /app/data && chown nobody:nobody /app/data
+# Copy entrypoint and make executable
+COPY entrypoint.sh /entrypoint.sh
+RUN chmod +x /entrypoint.sh
 
-ENV PATH="/app/.venv/bin:$PATH"
+# Ensure entrypoint's line endings are Unix
+RUN sed -i 's/\r$//g' /entrypoint.sh
 
-USER nobody
+EXPOSE 8000
 
 HEALTHCHECK --interval=30s --timeout=5s --start-period=30s --retries=3 \
     CMD python -c "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/v1/health', timeout=3)"
 
-ENTRYPOINT ["zabbcomm"]
+ENTRYPOINT ["/entrypoint.sh"]
+CMD ["serve"]

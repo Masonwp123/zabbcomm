@@ -21,8 +21,9 @@ paths:
    `device.status=0` and both its site and the org stay at `1`.
 2a. Every device at site A goes stale while site B is fresh: `site.status[A]=0`, A's
    devices get `2`, and the org stays at `1`.
-2b. Site formation: one device on a WAN IP stays unsited (no site discovery entry).
-   Reaching `SITE_MIN_DEVICES` creates the site.
+2b. Site formation: one workstation on a WAN IP stays unsited (no site discovery
+   entry). Reaching `SITE_MIN_DEVICES` creates the site, and so does a single server.
+   A check-in that omits `is_server` keeps the stored value.
 2c. WAN IP change: every device at site A checks in from a new IP. They move to the new
    site, A drops out of discovery, and **A never reports `0`**.
 2d. An unsited device (say a home laptop) goes stale: `device.status=0` and no site
@@ -44,4 +45,11 @@ paths:
 9. Caps: `MAX_ORGS` / `MAX_DEVICES_PER_ORG` are enforced.
 10. The sender raises or reports failures: the cycle logs and continues, check-ins still
     succeed, and the next cycle resends.
-11. Persistence round-trip: save, load, and the same registry comes back.
+11. Persistence round-trip: save, load, and the same registry comes back. Loading
+    recomputes IDs from names.
+12. Outages over time (`tests/test_outages.py`): with staggered, late check-ins, an org
+    or site outage and its recovery raise **only** the one alert at that level. A single
+    dead device is reported without extra delay. Any change to `evaluate` or to the
+    registry's timing fields must keep these passing.
+13. No token means 401 before the body is read; oversized bodies are 413.
+14. A Zabbix server that never replies times out.

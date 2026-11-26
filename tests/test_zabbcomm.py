@@ -1,6 +1,7 @@
+import asyncio
 import json
 import logging
-from dataclasses import asdict
+from dataclasses import asdict, replace
 from pathlib import Path
 
 import httpx
@@ -29,7 +30,12 @@ def dev(org: str, name: str, seen_ago: float, ip: str | None = HQ) -> z.Device:
 
 
 def run_eval(devices: list[z.Device], **kw: int) -> z.Evaluation:
-    params = {"device_timeout": TIMEOUT, "site_min_devices": 2, "ipv6_prefix": 64} | kw
+    params = {
+        "device_timeout": TIMEOUT,
+        "confirm_window": TIMEOUT // 2,
+        "site_min_devices": 2,
+        "ipv6_prefix": 64,
+    } | kw
     return z.evaluate(devices, NOW, **params)
 
 
@@ -143,6 +149,27 @@ def test_site_needs_min_devices() -> None:
     assert {s.site_name for s in two.sites} == {HQ}
 
 
+def test_single_server_forms_a_site_and_alerts_when_down() -> None:
+    server = replace(dev("Acme", "srv", 3000, BRANCH), is_server=True)
+    ev = run_eval([dev("Acme", "a", 60, HQ), dev("Acme", "b", 60, HQ), server])
+    assert site_statuses(ev) == {"203-0-113-10": z.ONLINE, "198-51-100-20": z.OFFLINE}
+    assert device_statuses(ev)["srv"] == z.SUPPRESSED
+
+
+def test_single_server_does_not_make_other_lone_devices_sites() -> None:
+    server = replace(dev("Acme", "srv", 60, BRANCH), is_server=True)
+    ev = run_eval([server, dev("Acme", "lt", 3000, HOME)])
+    assert site_statuses(ev) == {"198-51-100-20": z.ONLINE}
+    assert device_statuses(ev)["lt"] == z.OFFLINE
+
+
+def test_org_with_one_server_down_alerts_at_org_only() -> None:
+    ev = run_eval([replace(dev("Globex", "srv", 3000), is_server=True)])
+    assert ev.orgs[0].status == z.OFFLINE
+    assert site_statuses(ev) == {"203-0-113-10": z.SUPPRESSED}
+    assert device_statuses(ev) == {"srv": z.SUPPRESSED}
+
+
 def test_wan_ip_change_moves_devices_and_retires_old_site_without_alert() -> None:
     ev = run_eval([dev("Acme", "a", 60, "203.0.113.11"), dev("Acme", "b", 60, "203.0.113.11")])
     assert site_statuses(ev) == {"203-0-113-11": z.ONLINE}  # old 203-0-113-10 simply absent
@@ -211,7 +238,7 @@ def test_discovery_payload_shape() -> None:
 
 def make_monitor(tmp_path: Path, **overrides: object) -> tuple[z.Monitor, FakeSender]:
     settings = make_settings(tmp_path, **overrides)
-    registry = z.Registry(settings.max_orgs, settings.max_devices_per_org)
+    registry = z.Registry(settings.max_orgs, settings.max_devices_per_org, settings.confirm_window)
     sender = FakeSender()
     store = z.SnapshotStore(tmp_path / "registry.json")
     return z.Monitor(settings, registry, sender, store, started_at=NOW - 10 * TIMEOUT), sender
@@ -329,6 +356,15 @@ async def test_snapshot_round_trip(tmp_path: Path) -> None:
     assert [asdict(d) for d in loaded] == [asdict(d) for d in monitor.registry.devices()]
 
 
+def test_snapshot_without_is_server_still_loads(tmp_path: Path) -> None:
+    old = asdict(dev("Acme", "a", 60))
+    del old["is_server"]  # as written by earlier versions
+    path = tmp_path / "registry.json"
+    path.write_text(json.dumps({"version": 1, "devices": [old]}), encoding="utf-8")
+    (loaded,) = z.SnapshotStore(path).load()
+    assert loaded.is_server is False
+
+
 def test_corrupt_snapshot_is_moved_aside(tmp_path: Path) -> None:
     path = tmp_path / "registry.json"
     path.write_text("{not json", encoding="utf-8")
@@ -371,6 +407,19 @@ async def test_checkin_records_device_and_client_ip(tmp_path: Path) -> None:
         HQ,
         NOW,
     )
+
+
+@pytest.mark.anyio
+async def test_is_server_is_recorded_and_kept_when_omitted(tmp_path: Path) -> None:
+    app = z.create_app(make_settings(tmp_path), sender=FakeSender())
+    seen = []
+    async with client_for(app) as c:
+        for extra in ({}, {"is_server": True}, {}, {"is_server": None}, {"is_server": False}):
+            body = {"org": "A", "device": "1"} | extra
+            r = await c.post("/api/v1/checkin", json=body, headers=AUTH)
+            assert r.status_code == 204
+            seen.append(app.state.registry.devices()[0].is_server)
+    assert seen == [False, True, True, True, False]
 
 
 @pytest.mark.anyio
@@ -451,7 +500,162 @@ async def test_forwarded_ip_from_trusted_proxy_is_recorded(tmp_path: Path) -> No
     assert ips == {"1": BRANCH, "2": "192.0.2.99"}
 
 
+# --------------------------------------------------------- confirmation and moves
+
+
+def test_stale_device_is_pending_until_its_parent_is_confirmed() -> None:
+    # The sibling is online, but hasn't checked in recently enough to vouch for anything.
+    ev = run_eval([dev("Acme", "a", 1500), dev("Acme", "b", 3000)])
+    assert device_statuses(ev) == {"a": z.ONLINE, "b": z.PENDING}
+    values = dict(z.build_values(ev, in_grace=False))
+    assert z.device_key("status", "acme", "b") not in values
+    assert z.device_key("last_checkin", "acme", "b") in values
+
+
+def test_just_recovered_parent_is_not_yet_confirmed() -> None:
+    back = replace(dev("Acme", "a", 60), online_since=NOW - 300)
+    ev = run_eval([back, dev("Acme", "b", 3000)])
+    assert device_statuses(ev)["b"] == z.PENDING
+
+
+def test_registry_tracks_unbroken_runs_and_ip_moves() -> None:
+    registry = z.Registry(10, 10, confirm_window=1050)
+    record = registry.check_in("A", "1", HQ, None, 0)
+    assert (record.online_since, record.prev_ip) == (0, None)
+    registry.check_in("A", "1", HQ, None, 900)
+    assert record.online_since == 0
+    registry.check_in("A", "1", HOME, None, 1800)
+    assert (record.prev_ip, record.prev_seen, record.online_since) == (HQ, 900, 0)
+    registry.check_in("A", "1", HOME, None, 4000)  # after a gap
+    assert (record.online_since, record.prev_ip) == (4000, HQ)
+
+
+def test_loading_recomputes_ids_and_keeps_the_latest_duplicate() -> None:
+    old = replace(dev("Straße", "pc", 600), org_id="stra-e")
+    new = dev("Straße", "pc", 60)
+    registry = z.Registry(10, 10, confirm_window=1050)
+    registry.replace_all([new, old])
+    (d,) = registry.devices()
+    assert (d.org_id, d.last_seen) == ("strasse", NOW - 60)
+
+
+@pytest.mark.parametrize(
+    ("a", "b"),
+    [("東京 Office", "大阪 Office"), ("Ørsted", "Rsted"), ("が Ltd", "か Ltd")],
+)
+def test_names_with_unconvertible_letters_stay_distinct(a: str, b: str) -> None:
+    assert z.slugify(a) != z.slugify(b)
+
+
+def test_equivalent_spellings_share_an_id() -> None:
+    assert z.slugify("Straße") == z.slugify("STRASSE") == "strasse"
+    assert z.slugify("Café") == z.slugify("CAFÉ") == "cafe"
+    assert z.slugify("Ørsted") == z.slugify("ØRSTED")
+
+
+# ------------------------------------------------------------------- request guard
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("content", [b"{bad", b"\xff\xfe\xfd", b"x" * 100_000])
+async def test_no_token_is_401_whatever_the_body(tmp_path: Path, content: bytes) -> None:
+    app = z.create_app(make_settings(tmp_path), sender=FakeSender())
+    async with client_for(app) as c:
+        r = await c.post("/api/v1/checkin", content=content)
+    assert r.status_code == 401
+
+
+@pytest.mark.anyio
+async def test_body_is_not_read_without_a_token() -> None:
+    sent: list[dict] = []
+
+    async def receive() -> dict:
+        raise AssertionError("body was read")
+
+    async def send(message: dict) -> None:
+        sent.append(message)
+
+    async def inner(*args: object) -> None:
+        raise AssertionError("request reached the app")
+
+    scope = {"type": "http", "method": "POST", "path": "/api/v1/checkin", "headers": []}
+    await z.RequestGuard(inner, TOKEN)(scope, receive, send)
+    assert sent[0]["status"] == 401
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("streamed", [False, True])
+async def test_oversized_body_is_413(tmp_path: Path, streamed: bool) -> None:
+    async def chunks():  # no Content-Length
+        for _ in range(20):
+            yield b"x" * 1000
+
+    app = z.create_app(make_settings(tmp_path), sender=FakeSender())
+    async with client_for(app) as c:
+        content = chunks() if streamed else b"x" * 20_000
+        r = await c.post("/api/v1/checkin", content=content, headers=AUTH)
+    assert r.status_code == 413
+
+
+@pytest.mark.anyio
+async def test_longest_fully_escaped_names_fit_the_body_limit(tmp_path: Path) -> None:
+    app = z.create_app(make_settings(tmp_path), sender=FakeSender())
+    body = json.dumps({"org": "é" * 128, "device": "ü" * 128, "agent_version": "1" * 32})
+    async with client_for(app) as c:
+        r = await c.post(
+            "/api/v1/checkin",
+            content=body,
+            headers=AUTH | {"Content-Type": "application/json"},
+        )
+    assert r.status_code == 204
+
+
+# ---------------------------------------------------------------------------- sender
+
+
+@pytest.mark.anyio
+async def test_sender_gives_up_on_a_server_that_never_replies(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def never(items: list) -> None:
+        await asyncio.Event().wait()
+
+    sender = z.ZabbixSender("zabbix.invalid", 10051, timeout=0.01)
+    monkeypatch.setattr(sender._sender, "send", never)
+    with pytest.raises(TimeoutError):
+        await sender.send("zabbcomm", [(z.KEY_ALIVE, "1")], 0)
+
+
+@pytest.mark.anyio
+async def test_sender_chunks_and_totals_results(monkeypatch: pytest.MonkeyPatch) -> None:
+    sizes: list[int] = []
+
+    async def fake(items: list) -> z.SendResult:
+        sizes.append(len(items))
+        return z.SendResult(len(items) - 1, 1)
+
+    sender = z.ZabbixSender("zabbix.invalid", 10051)
+    monkeypatch.setattr(sender._sender, "send", fake)
+    result = await sender.send("zabbcomm", [(z.KEY_ALIVE, "1")] * 600, 0)
+    assert sizes == [250, 250, 100]
+    assert result == z.SendResult(597, 3)
+
+
 # --------------------------------------------------------------------------- config
+
+
+@pytest.mark.parametrize(
+    ("overrides", "message"),
+    [
+        ({"device_timeout": 1800}, "more than twice CHECKIN_INTERVAL"),
+        ({"device_forget_after": 1800}, "at least twice DEVICE_TIMEOUT"),
+    ],
+)
+def test_settings_that_would_silence_alerts_are_rejected(
+    tmp_path: Path, overrides: dict, message: str
+) -> None:
+    with pytest.raises(ValueError, match=message):
+        make_settings(tmp_path, **overrides)
 
 
 @pytest.mark.parametrize(

@@ -1,26 +1,5 @@
-<#
-.SYNOPSIS
-    Sends one zabbcomm check-in for this device.
-
-.DESCRIPTION
-    Run by a Syncro policy every 15 minutes. Installs nothing and changes nothing on
-    the device. Written for Windows PowerShell 5.1.
-
-    Syncro supplies these variables. Do not assign them in this script, because that
-    would overwrite the values Syncro provides.
-
-      $orgName    Platform variable: the organization (customer) name
-      $assetName  Platform variable: the asset (computer) name
-      $appUrl     Script variable: zabbcomm base URL, e.g. https://zabbcomm.example.com
-      $apiToken   Script variable: the app's API_TOKEN
-
-    Exit codes:
-      0  Checked in, or the check-in could not be delivered (expected during an outage)
-      1  Setup problem: a variable is missing or invalid, or zabbcomm rejected the request
-#>
-
 # Bump this whenever the script changes behaviour.
-$AgentVersion = '1.0.0'
+$AgentVersion = '1.2.0'
 
 $ProgressPreference = 'SilentlyContinue'
 
@@ -41,7 +20,19 @@ if ($baseUrl -notmatch '^https://' -and $baseUrl -notmatch '^http://(localhost|1
 
 $org = "$orgName".Trim()
 $device = "$assetName".Trim()
-$json = @{ org = $org; device = $device; agent_version = $AgentVersion } | ConvertTo-Json -Compress
+$body = @{ org = $org; device = $device; agent_version = $AgentVersion }
+
+# If the type is unknown, leave is_server out so zabbcomm keeps what it already knows.
+$type = "$deviceType".Trim()
+$typeIsValid = @('server', 'user') -contains $type
+if ($typeIsValid) {
+    $body.is_server = ($type -eq 'server')
+}
+else {
+    Write-Output "zabbcomm: deviceType must be 'server' or 'user', got '$type'"
+}
+
+$json = $body | ConvertTo-Json -Compress
 
 try {
     [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12
@@ -88,4 +79,5 @@ if ($response.StatusCode -ne 204) {
 }
 
 Write-Output "zabbcomm: checked in '$org' / '$device'"
+if (-not $typeIsValid) { exit 1 }
 exit 0

@@ -1,16 +1,16 @@
 ---
 name: zabbix-template
-description: Create or update zabbix/zabbcomm_template.yaml (the Zabbix template export with trapper items, LLD rules, item/trigger prototypes) so it matches the Zabbix keys defined in src/zabbcomm/__init__.py. Use when adding/renaming/removing a Zabbix item or trigger, or when asked to produce the template for import.
+description: Create or update zabbix/zabbcomm_template.yaml (the Zabbix template export with trapper items, LLD rules, item/trigger prototypes) so it matches the Zabbix keys defined in src/zabbcomm/__main__.py. Use when adding/renaming/removing a Zabbix item or trigger, or when asked to produce the template for import.
 ---
 
 # Maintain the Zabbix template
 
-The template and the "Zabbix payloads" section of `src/zabbcomm/__init__.py` form one
+The template and the "Zabbix payloads" section of `../../../src/zabbcomm/__main__.py` form one
 contract. If they drift, Zabbix quietly rejects values (`failed: N` in the sender
 responses) and alerts stop firing.
 
 1. **Read the contract.** Read the key constants and builders in the "Zabbix payloads"
-   section of `src/zabbcomm/__init__.py`, plus the key table and trigger design in
+   section of `../../../src/zabbcomm/__main__.py`, plus the key table and trigger design in
    `.claude/rules/zabbix.md`. If the code and the rules file disagree, stop and ask
    which one is right.
 
@@ -38,7 +38,7 @@ responses) and alerts stop firing.
    rather than grepping it:
 
    ```bash
-   uv run python -c "import zabbcomm as z; d=[z.Device('o',i,'O',i,0,'203.0.113.1') for i in 'ab']; ev=z.evaluate(d,0,device_timeout=1,site_min_devices=2,ipv6_prefix=64); print(chr(10).join(sorted({k.split('[')[0] for k,_ in z.build_values(ev,in_grace=False)}|set(z.build_discovery(ev)))))" | tr -d '\r' > /tmp/code_keys
+   uv run python -c "import zabbcomm as z; d=[z.Device('o',i,'O',i,0,'203.0.113.1') for i in 'ab']; ev=z.evaluate(d,0,device_timeout=1,confirm_window=1,site_min_devices=2,ipv6_prefix=64); print(chr(10).join(sorted({k.split('[')[0] for k,_ in z.build_values(ev,in_grace=False)}|set(z.build_discovery(ev)))))" | tr -d '\r' > /tmp/code_keys
    grep -oE 'zabbcomm\.[a-z_.]+[a-z_]' zabbix/zabbcomm_template.yaml | sort -u > /tmp/tpl_keys
    diff /tmp/code_keys /tmp/tpl_keys
    ```
