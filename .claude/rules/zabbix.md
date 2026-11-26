@@ -1,9 +1,7 @@
 ---
 paths:
-  - "src/zabbcomm/zabbix*.py"
-  - "src/zabbcomm/evaluator.py"
+  - "src/zabbcomm/**"
   - "zabbix/**"
-  - "tests/**/test_zabbix*.py"
 ---
 
 # Zabbix integration rules
@@ -45,12 +43,16 @@ paths:
 - Device items are keyed by device only, not by site. A device moving between sites (a
   laptop, or an ISP IP change) keeps its item history.
 - `site_id` is the slug of the IP. For example `203.0.113.7` becomes `203-0-113-7`, and
-  an IPv6 `/64` becomes something like `2001-db8-1-2--64`. A changed WAN IP is therefore
+  an IPv6 `/64` becomes `2001-db8-1-2-64`. A changed WAN IP is therefore
   a *new* site and the old one is retired, which is intended (see CLAUDE.md "Sites").
 
 - **Item keys use slug IDs only.** Display names (`{#ORG}`, `{#DEVICE}`) go in item and
   trigger *names*. Slugs never need key-parameter quoting, and display names can contain
   commas, quotes and brackets.
+- In the template, give the count and `wan_ip` items the preprocessing step **"Discard
+  unchanged with heartbeat"** (heartbeat 1h). The app resends every value each cycle
+  (`EVAL_INTERVAL`), and this keeps history small. Status items can use it too, as long
+  as the heartbeat is shorter than any `nodata()` window on them.
 - Changing a key is a **breaking change**: Zabbix creates a new item and the old one's
   history is lost. Point this out before doing it.
 - Always send discovery **before** values for a new org or device. Send it the moment a
@@ -81,5 +83,6 @@ paths:
   the export's `version:` must not be newer than the server.
 - Every template, item, prototype and trigger needs a stable 32-hex-char `uuid`. Create
   new ones only for new entities, and **never change an existing UUID**.
-- The keys in the template must match the constants in `zabbix.py` exactly. Use the
+- The keys in the template must match the constants in the "Zabbix payloads" section of
+  `src/zabbcomm/__init__.py` exactly. Use the
   `zabbix-template` skill when editing.

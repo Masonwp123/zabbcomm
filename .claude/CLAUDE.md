@@ -71,28 +71,44 @@ escalation, maintenance windows, business hours). Don't put alert policy in Pyth
 
 ## Status
 
-Scaffold only. `src/zabbcomm/__init__.py` holds a hello-world `main()`. FastAPI, uvicorn,
-pydantic-settings and zabbix_utils are **not added yet**. Add them with `uv add` (dev:
-`uv add --dev pytest httpx ruff`) when implementing.
+- **Done:** the Python connector. Tests are in `tests/test_zabbcomm.py`.
+- **Not written yet:** `scripts/Send-ZabbcommCheckin.ps1` and
+  `zabbix/zabbcomm_template.yaml`.
 
-## Planned layout
+## Layout
+
+The whole app is **one module, `src/zabbcomm/__init__.py`**, ordered from pure logic to
+I/O:
+
+| Section | Contents |
+|---|---|
+| Settings | `Settings`, `load_settings()` |
+| IDs and sites | `slugify`, `site_network` |
+| Registry | `Registry`, `Device` |
+| Evaluator | `evaluate`, the status dataclasses |
+| Zabbix payloads | key constants, `build_discovery`, `build_values` |
+| Senders | `ZabbixSender`, `DryRunSender` |
+| Persistence | `SnapshotStore` |
+| Monitor loop | `Monitor.run_cycle` / `Monitor.run_forever` |
+| FastAPI app | `create_app()` factory |
+| Entry point | `main()` (the Docker ENTRYPOINT `zabbcomm`) |
+
+- Keep it a single file. It's about 680 lines now. If it passes about 900 lines, or a
+  section starts needing its own helpers, split along those section lines.
+- **Importing `zabbcomm` must have no side effects.** No module-level `Settings()` and
+  no module-level `app`. Settings are read only in `create_app()` and `main()`.
+- `create_app(settings, sender=, clock=)` takes everything injectable. Tests pass a
+  fake sender and a fixed clock, and `app.state.registry` exposes state.
 
 ```
-src/zabbcomm/
-  __init__.py     main(): load Settings, run uvicorn (Docker ENTRYPOINT is `zabbcomm`)
-  app.py          create_app(): FastAPI app, routes, lifespan starts/stops the evaluator loop
-  config.py       Settings (pydantic-settings, env vars below)
-  models.py       request/response schemas
-  registry.py     Registry: the only mutable state. (org_id, device_id) -> DeviceRecord(last_seen, last_ip, ...)
-  sites.py        pure: WAN IP -> site_id (IPv6 prefixing), device -> site membership
-  evaluator.py    pure function: registry snapshot + now -> Org/Site/Device statuses
-  zabbix.py       item key constants, discovery/value payload builders, sender wrapper
-  persistence.py  atomic JSON snapshot load/save in DATA_DIR
 scripts/
   Send-ZabbcommCheckin.ps1   Syncro policy script, runs every 15 min, one check-in per run
 zabbix/
   zabbcomm_template.yaml     Zabbix template export (items, LLD rules, triggers)
 tests/
+  test_zabbcomm.py
+compose.yaml                 Docker Compose deployment, configured through .env
+Dockerfile
 ```
 
 ## API contract
@@ -106,8 +122,18 @@ tests/
 - `org` and `device` are required, trimmed, 1 to 128 chars, with no control characters.
   `agent_version` is optional. Ignore unknown fields. There is deliberately **no WAN IP
   field**, because the site comes from the request's source address.
-- Returns `204` on success, `401` for a bad or missing token, and `422` for validation
-  errors. The response body must not echo the token or internal state.
+- Returns:
+  - `204` on success.
+  - `401` for a bad or missing token. Auth is checked before the body, so
+    unauthenticated callers can't probe validation.
+  - `422` for validation errors.
+  - `403` when `MAX_ORGS` or `MAX_DEVICES_PER_ORG` would be exceeded.
+
+  The response body must not echo the token or internal state.
+- Interactive docs and the OpenAPI schema are disabled, because the app faces the
+  internet.
+- Names with no ASCII letters or digits (for example non-Latin scripts) get a hash ID,
+  `h-<12 hex>`, instead of being rejected.
 - **IDs:** `org_id` and `device_id` are slugs of the names (casefold, runs of non
   `[a-z0-9]` become `-`, trimmed). IDs key everything, including Zabbix item keys. The
   display names (latest seen) only appear in Zabbix item and trigger *names*.
@@ -125,13 +151,17 @@ tests/
 `GET /healthz` returns `200 {"status": "ok"}` and is unauthenticated, for Docker or a load
 balancer. It must not expose org or device data.
 
-## Configuration (env vars, read in `config.py`)
+## Configuration (env vars, read by `Settings`)
+
+Keep this table, `Settings` and `.env.example` in step. `compose.yaml` pins `HOST`,
+`PORT` and `DATA_DIR` inside the container and adds `PUBLISH_ADDRESS` (default
+`127.0.0.1`), `PUBLISH_PORT` (`8000`) and `ZABBCOMM_IMAGE` for the host side.
 
 | Var | Default | Meaning |
 |---|---|---|
 | `APP_URL` | none | Public base URL that endpoints post to. Documentation and script only; not used for binding |
 | `HOST` / `PORT` | `0.0.0.0` / `8000` | uvicorn bind address |
-| `API_TOKEN` | **required** | Shared bearer token that endpoints send |
+| `API_TOKEN` | **required**, at least 16 chars | Shared bearer token that endpoints send |
 | `ZABBIX_SERVER` | **required** | Zabbix server or proxy address for sender data |
 | `ZABBIX_PORT` | `10051` | Trapper port |
 | `ZABBIX_HOST` | `zabbcomm` | Zabbix host (template linked) that owns all items |
@@ -154,19 +184,25 @@ balancer. It must not expose org or device data.
 - **The evaluator is pure.** Given a snapshot and `now` it returns statuses. It does no
   I/O and touches no globals.
 - **The registry is the only mutable state.** Mutate it only in sync code with no `await`
-  between read and write. That is safe on one event loop without locks. Keep it to one
-  uvicorn worker. Multiple workers would split state, so changing that needs a shared
+  between read and write. That is safe on one event loop without locks. **Route
+  handlers that touch it must be `async def`.** A plain `def` handler runs in
+  Starlette's threadpool and would race the monitor. Keep it to one uvicorn worker. Multiple workers would split state, so changing that needs a shared
   store and is a design change.
 - **Zabbix failures never break check-ins.** Log sender errors and retry on the next
   cycle. A Zabbix outage must not crash the evaluator loop: catch, log, continue.
-- **Batch, don't stream.** Use one sender request per cycle, never one per check-in.
+- **Batch, don't stream.** Send one batch per cycle, never one request per check-in.
+  `zabbix_utils` sends it in chunks of 250, in order. Discovery goes at the front of
+  the batch.
+- **Config errors must not echo values.** `load_settings()` formats validation errors
+  without their inputs, because a too-short `API_TOKEN` would otherwise be printed.
 - **Startup grace period.** For `DEVICE_TIMEOUT` seconds after startup, send only
   `alive` and status `1` values, never `0`. Devices loaded from the snapshot look stale
   only because the app was down.
 - **Persistence.** Write the registry to `DATA_DIR/registry.json` atomically (write a
   temp file, then `os.replace`) each cycle, and load it at startup. Don't add a database
   or ORM without asking.
-- **All Zabbix key strings live in `zabbix.py`.** Never inline them elsewhere.
+- **All Zabbix key strings live in the "Zabbix payloads" section.** Never inline them
+  elsewhere.
 - **Never log `API_TOKEN`** or the `Authorization` header.
 
 ## Known limitations and open questions (raise these, don't silently "fix" them)
@@ -211,10 +247,11 @@ balancer. It must not expose org or device data.
 ```bash
 uv sync                                            # install deps
 uv run zabbcomm                                    # run like the container does
-uv run uvicorn zabbcomm.app:create_app --factory --reload   # dev server
+uv run uvicorn zabbcomm:create_app --factory --reload   # dev server
 uv run pytest                                      # tests
 uv run ruff check . && uv run ruff format --check .
-docker build -t zabbcomm .
+docker compose up -d --build                       # build and run (needs .env)
+uv run --env-file .env zabbcomm                    # run with .env, without Docker
 ```
 
 ## Conventions

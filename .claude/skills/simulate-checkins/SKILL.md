@@ -13,7 +13,7 @@ site. The addresses below are documentation ranges (RFC 5737).
    its log output:
 
    ```bash
-   API_TOKEN=dev-token ZABBIX_SERVER=127.0.0.1 ZABBIX_DRY_RUN=true \
+   API_TOKEN=dev-token-0123456789 ZABBIX_SERVER=127.0.0.1 ZABBIX_DRY_RUN=true \
    DEVICE_TIMEOUT=20 EVAL_INTERVAL=5 DATA_DIR=./.devdata LOG_LEVEL=DEBUG \
    uv run zabbcomm
    ```
@@ -24,7 +24,7 @@ site. The addresses below are documentation ranges (RFC 5737).
 
    ```bash
    post() { curl -s -o /dev/null -w "%{http_code} $1/$2 via $3\n" -X POST http://127.0.0.1:8000/api/v1/checkin \
-     -H "Authorization: Bearer dev-token" -H "Content-Type: application/json" \
+     -H "Authorization: Bearer dev-token-0123456789" -H "Content-Type: application/json" \
      -H "X-Forwarded-For: $3" -d "{\"org\":\"$1\",\"device\":\"$2\"}"; }
    HQ=203.0.113.10; BRANCH=198.51.100.20; HOME=192.0.2.50; GLOBEX=203.0.113.99
    hq()     { for d in ACME-WS01 ACME-WS02 ACME-SRV01; do post "Acme Inc" $d ${1:-$HQ}; done; }

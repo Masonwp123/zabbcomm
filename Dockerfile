@@ -19,9 +19,15 @@ COPY pyproject.toml uv.lock ./
 RUN --mount=from=ghcr.io/astral-sh/uv:0.13.8,source=/uv,target=/bin/uv \
     uv sync --locked --no-dev --no-install-project
 
+# README.md is named in pyproject.toml, so building the project needs it.
+COPY README.md ./
 COPY src ./src
 RUN --mount=from=ghcr.io/astral-sh/uv:0.13.8,source=/uv,target=/bin/uv \
     uv sync --locked --no-dev --no-editable
+
+# Registry snapshot location. A new named volume mounted here inherits this ownership,
+# which lets the unprivileged user write to it.
+RUN mkdir /app/data && chown nobody:nobody /app/data
 
 ENV PATH="/app/.venv/bin:$PATH"
 

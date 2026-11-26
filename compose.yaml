@@ -1,0 +1,50 @@
+# Setup: copy .env.example to .env, fill it in, then
+#   docker compose up -d --build                     build from this checkout
+#   docker compose pull && docker compose up -d      use the published image
+#
+# SITE DETECTION needs the app to see each endpoint's real public IP:
+#   - Docker Engine on Linux keeps the source IP of IPv4 connections to a published port.
+#   - Docker Desktop (Windows/macOS) and rootless Docker usually replace it with an
+#     internal address, so every org looks like a single site. Use those for testing only.
+#   - Behind a reverse proxy, set FORWARDED_ALLOW_IPS in .env.
+
+services:
+  zabbcomm:
+    image: ${ZABBCOMM_IMAGE:-ghcr.io/masonwp123/zabbcomm:latest}
+    build: .
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      # Fixed inside the container; these override .env. Change the published
+      # address and port with PUBLISH_ADDRESS / PUBLISH_PORT instead.
+      HOST: 0.0.0.0
+      PORT: "8000"
+      DATA_DIR: /app/data
+    ports:
+      - "${PUBLISH_ADDRESS:-127.0.0.1}:${PUBLISH_PORT:-8000}:8000"
+    volumes:
+      - data:/app/data
+    extra_hosts:
+      # Lets ZABBIX_SERVER=host.docker.internal reach Zabbix running on the Docker host.
+      - "host.docker.internal:host-gateway"
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:8000/healthz"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+    read_only: true
+    tmpfs:
+      - /tmp
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "5"
+
+volumes:
+  data:
