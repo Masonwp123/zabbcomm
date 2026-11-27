@@ -1,6 +1,5 @@
 # Bump this whenever either part of the agent changes behaviour.
 $AgentVersion = '2.1.1'
-$IntervalMinutes = 5
 
 $ErrorActionPreference = 'Stop'
 $ProgressPreference = 'SilentlyContinue'
@@ -92,6 +91,12 @@ catch {
 }
 
 # ------------------------------------------------------------------------- variables
+
+# Set default
+if ([string]::IsNullOrWhiteSpace($IntervalMinutes)) {
+    $IntervalMinutes = 5
+    Write-Output "zabbcomm: IntervalMinutes not defined, defaulting to 5"
+}
 
 $missing = @('orgName', 'assetName', 'appUrl', 'apiToken') | Where-Object {
     [string]::IsNullOrWhiteSpace((Get-Variable -Name $_ -ValueOnly -ErrorAction SilentlyContinue))
