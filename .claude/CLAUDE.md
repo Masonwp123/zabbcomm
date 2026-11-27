@@ -97,7 +97,9 @@ parent (site, else org) is **confirmed** up:
   devices whose *last known* site is X can make X go down.
 - **Leftovers don't make an abandoned IP go down.** If every device still on an IP went
   quiet at least a confirm window before another device last used that IP and then moved
-  away (`prev_ip` / `prev_seen`), the IP isn't treated as a site. This covers a server
+  away (`prev_ip` / `prev_seen`), the IP isn't treated as a site. `prev_ip` changes only
+  when the device's *network* changes, never when its address changes within one (IPv6
+  privacy addresses rotate constantly). This covers a server
   that was already off when the ISP address changed.
 
 ### Endpoint agent and deny list
@@ -156,35 +158,38 @@ escalation, maintenance windows, business hours). Don't put alert policy in Pyth
 - **Reported working by the user** (2026-11-26) against their Zabbix server.
 - **Not yet confirmed there:** the `last_checkin` items, added afterwards.
 - **Not yet confirmed in Syncro:** script version 1.2.0, which takes `$deviceType`.
-- **Agent (2.1.0) not yet run on a real device:** tested with stand-in task commands,
+- **Agent (2.1.1) not yet run on a real device:** tested with stand-in task commands,
   without elevation. Real task registration, the SYSTEM-only folder ACL and
   self-removal as SYSTEM are unverified.
-- **Not yet run under Docker since the pre-publish fixes:** the `data-permissions`
-  service and loopback port binding in `compose.yaml`, and the release workflow's test
-  job and tag ranking (the ranking script was tested locally).
+- **Not yet run under Docker since the 2026-11-27 fixes:** the entrypoint's `DATA_DIR`
+  handling, the `FORWARDED_ALLOW_IPS` default, and uv 0.13.10 in the image (the build
+  steps were run locally). The release workflow's test job is also unrun.
 
 ## Layout
 
-The whole app is **one module, `../src/zabbcomm/__main__.py`**, ordered from pure logic to
-I/O:
+The app is the package `src/zabbcomm/`, split by concern (split from one file on
+2026-11-27):
 
-| Section | Contents |
+| Module | Contents |
 |---|---|
-| Settings | `Settings`, `load_settings()` |
-| IDs and sites | `slugify`, `site_network` |
-| Registry | `Registry`, `Device` |
-| Evaluator | `evaluate`, the status dataclasses |
-| Zabbix payloads | key constants, `build_discovery`, `build_values` |
-| Senders | `ZabbixSender`, `DryRunSender` |
-| Persistence | `SnapshotStore` |
-| Monitor loop | `Monitor.run_cycle` / `Monitor.run_forever` |
-| FastAPI app | `create_app()` factory |
-| Entry point | `main()` (the Docker ENTRYPOINT `zabbcomm`) |
+| `settings.py` | `Settings`, `load_settings()` |
+| `ids.py` | `slugify`, `site_network` |
+| `registry.py` | `Registry`, `Device` (the only mutable state) |
+| `evaluator.py` | `evaluate`, the status values and dataclasses (pure) |
+| `zabbix.py` | item keys, `build_discovery`, `build_values`, `ZabbixSender`, `DryRunSender` |
+| `persistence.py` | `SnapshotStore` |
+| `deny.py` | `DenyList`, `uninstall_signature` |
+| `monitor.py` | `Monitor`: the evaluate / send / save loop, and `stop()` for shutdown |
+| `app.py` | `create_app()`, `RequestGuard`, `CheckIn` |
+| `__main__.py` | `main()`: the `zabbcomm` command and `python -m zabbcomm` |
+| `__init__.py` | re-exports the public names, so `import zabbcomm as z` reaches everything |
 
-- Keep it a single file. It's about 880 lines now. If it passes about 900 lines, or a
-  section starts needing its own helpers, split along those section lines.
+- Keep modules small and single-purpose. A module past about 300 lines is a sign to split.
+- Dependencies point one way: settings, ids → registry → evaluator → zabbix → monitor
+  → app → `__main__`. Never import `app` or `monitor` from a lower module.
 - **Importing `zabbcomm` must have no side effects.** No module-level `Settings()` and
   no module-level `app`. Settings are read only in `create_app()` and `main()`.
+- Every module logs to the `zabbcomm` logger.
 - `create_app(settings, sender=, clock=)` takes everything injectable. Tests pass a
   fake sender and a fixed clock, and `app.state.registry` exposes state.
 
@@ -200,9 +205,11 @@ tests/
   test_zabbcomm.py           unit and API tests
   test_outages.py            outages and recoveries simulated over time
   test_deny.py               deny list and signed uninstall replies
+  test_regressions.py        fixes from the 2026-11-27 review
 compose.yaml                 Docker Compose deployment; settings are listed inline
 .env.example                 the few values compose.yaml reads from .env
 Dockerfile                   includes the HEALTHCHECK
+entrypoint.sh                prepares DATA_DIR, then drops root to PUID / PGID
 ```
 
 ## API contract
@@ -238,10 +245,12 @@ Dockerfile                   includes the HEALTHCHECK
   Display names (latest seen) only appear in Zabbix item and trigger *names*.
 - Record the client IP from `request.client.host`. **Site detection depends on this
   being the real client IP.** Uvicorn's proxy-header support is on by default and trusts
-  only `127.0.0.1`. Behind a reverse proxy, set `FORWARDED_ALLOW_IPS=<proxy IP>`.
+  only `127.0.0.1` unless `FORWARDED_ALLOW_IPS` says otherwise (compose sets it).
   `main()` must keep uvicorn's proxy-header behaviour and not override it. Never parse
-  `X-Forwarded-For` by hand, and never trust it from arbitrary sources. If it's misconfigured, every device
-  shows the proxy's IP, so each org collapses into one site.
+  `X-Forwarded-For` by hand, and never trust it from arbitrary sources. If it's
+  misconfigured, every device shows the proxy's IP, so each org collapses into one site.
+  The check-in handler logs a warning (at most hourly) when a request carries
+  `X-Forwarded-For` that uvicorn didn't use.
 - **`APP_URL` should resolve to IPv4 only** (an A record, no AAAA). On a dual-stack site,
   some devices would otherwise arrive over IPv6 with different addresses and split one
   site in two. IPv6 sources are still accepted and grouped by `/SITE_IPV6_PREFIX`.
@@ -260,15 +269,21 @@ settings:
   `env_file`, so **a variable reaches the container only if it is listed there**.
 - **`.env` supplies only what compose interpolates:** `APP_URL`, `API_TOKEN`,
   `ZABBIX_SERVER`, and optionally `ZABBCOMM_IMAGE` (the image to run),
-  `FORWARDED_ALLOW_IPS` (default `127.0.0.1`) and `PUBLISH_ADDRESS` (default
-  `127.0.0.1`). Change other settings in `compose.yaml`. Keep `.env.example` to this
-  set.
+  `FORWARDED_ALLOW_IPS` and `PUBLISH_ADDRESS` (default `127.0.0.1`, used only by the
+  `ports:` mapping). Change other settings in `compose.yaml`. Keep `.env.example` to
+  this set.
 - `HOST`, `PORT` and `DATA_DIR` aren't listed, so the code defaults apply.
 - **Port 8000 is published on loopback only**, because the app serves plain HTTP and
   expects a TLS reverse proxy. Set `PUBLISH_ADDRESS` if the proxy is elsewhere.
-- **Data is bind-mounted from `./docker/data`** (ignored by git and Docker). The one-shot
-  `data-permissions` service makes it writable by `nobody` (uid 65534) before the app
-  starts.
+- **`FORWARDED_ALLOW_IPS` defaults to `172.16.0.0/12,192.168.0.0/16`.** A proxy on the
+  Docker host connects through Docker's network gateway, never from `127.0.0.1`, so the
+  default trusts Docker's private ranges. That's safe only while the port is on
+  loopback; with `PUBLISH_ADDRESS` set, set `FORWARDED_ALLOW_IPS` to the proxy's address.
+- **The container starts as root in `entrypoint.sh`**, which creates `DATA_DIR`
+  (default `/data`), gives it to `PUID` / `PGID` (default 1000, set in compose), and
+  drops to that user with `setpriv`. Alpine's BusyBox `setpriv` can't do that; the
+  `util-linux` package provides the full one. `PUID` / `PGID` aren't `Settings`.
+- **Data is bind-mounted from `./docker/data`** (ignored by git and Docker).
 
 | Var | Default | Meaning |
 |---|---|---|
@@ -318,8 +333,9 @@ settings:
 - **Persistence.** Write the registry to `DATA_DIR/registry.json` atomically (write a
   temp file, then `os.replace`) each cycle, and load it at startup. Don't add a database
   or ORM without asking.
-- **All Zabbix key strings live in the "Zabbix payloads" section.** Never inline them
-  elsewhere.
+- **All Zabbix key strings live in `zabbix.py`.** Never inline them elsewhere.
+- **Shutdown goes through `Monitor.stop()`**, which waits for an in-progress snapshot
+  save before writing the final one. Cancelling the loop doesn't stop a save thread.
 - **Never log `API_TOKEN`** or the `Authorization` header.
 
 ## Known limitations and open questions (raise these, don't silently "fix" them)

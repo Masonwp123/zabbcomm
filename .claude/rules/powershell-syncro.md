@@ -21,9 +21,11 @@ Two ways to check in. Inputs, compatibility and versioning rules below apply to 
   writable only by SYSTEM and Administrators. Any user can create folders in
   `ProgramData`, so a folder that isn't locked down is deleted and recreated, never
   reused. Never put the token in task arguments.
-- **Never delete with `Remove-Item -Recurse`.** Use `Remove-Tree`, which removes links
-  without following them. (`[IO.Directory]::Delete($path, $true)` fails on a folder
-  containing a link; the agent only uses it on its own locked folder.)
+- **Never look inside or delete a folder an untrusted user can change.** Its owner can
+  swap a subfolder for a link between our check and our delete, and SYSTEM would then
+  delete files elsewhere. An install folder that fails `Test-LockedDirectory` is renamed
+  aside unopened (`Move-Aside`) and reported. `Remove-Tree` is only for the locked
+  folder, and never `Remove-Item -Recurse`.
 - **Self-removal has exactly two triggers:** a `410` with a valid
   `X-Zabbcomm-Uninstall` signature for that request's nonce (keep the server's
   `uninstall_signature` and `Test-UninstallOrder` in step), or expiry.

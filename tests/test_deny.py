@@ -7,7 +7,7 @@ from pathlib import Path
 import httpx
 import pytest
 
-import zabbcomm.__main__ as z
+import zabbcomm as z
 
 TOKEN = "test-token-0123456789"
 NONCE = "0123456789abcdef0123456789abcdef"

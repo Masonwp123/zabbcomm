@@ -19,7 +19,8 @@ RUN apk update && apk upgrade --no-cache && \
     util-linux
 
 # uv installs exactly the versions in uv.lock, so every build of a commit gets the same dependencies
-COPY --from=ghcr.io/astral-sh/uv:0.13.8 /uv /usr/local/bin/uv
+# Same version as CI and the uv_build requirement in pyproject.toml.
+COPY --from=ghcr.io/astral-sh/uv:0.13.10 /uv /usr/local/bin/uv
 
 # Dependencies first: this layer is reused as long as uv.lock does not change
 COPY pyproject.toml uv.lock ./

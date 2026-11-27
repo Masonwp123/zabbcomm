@@ -1,5 +1,5 @@
 # Bump this whenever either part of the agent changes behaviour.
-$AgentVersion = '2.1.0'
+$AgentVersion = '2.1.1'
 $IntervalMinutes = 5
 
 $ErrorActionPreference = 'Stop'
@@ -40,18 +40,14 @@ function Test-LockedDirectory {
     return -not $others
 }
 
-# Deletes a file or folder. A link is removed itself, never what it points to (which
-# Remove-Item -Recurse can't be trusted to respect, running as SYSTEM).
-function Remove-Tree([string]$Path) {
-    $item = Get-Item -LiteralPath $Path -Force
-    if (-not $item.PSIsContainer) {
-        Remove-Item -LiteralPath $Path -Force
-        return
-    }
-    if (-not ($item.Attributes -band [IO.FileAttributes]::ReparsePoint)) {
-        foreach ($child in Get-ChildItem -LiteralPath $Path -Force) { Remove-Tree $child.FullName }
-    }
-    [IO.Directory]::Delete($Path)
+# Renames a file, folder or link out of the way without looking inside it. A folder
+# someone else controls must never be walked or deleted: they could swap part of it for
+# a link mid-delete and make this script, running as SYSTEM, delete files elsewhere.
+function Move-Aside([string]$Path) {
+    $aside = "$Path.untrusted-$([guid]::NewGuid().ToString('N'))"
+    if ((Get-Item -LiteralPath $Path -Force).PSIsContainer) { [IO.Directory]::Move($Path, $aside) }
+    else { [IO.File]::Move($Path, $aside) }
+    return $aside
 }
 
 function Initialize-InstallDirectory {
@@ -59,7 +55,8 @@ function Initialize-InstallDirectory {
     # receive the token, or a script that runs as SYSTEM, so start again from nothing.
     if (-not (Test-LockedDirectory)) {
         if (Get-Item -LiteralPath $InstallDir -Force -ErrorAction SilentlyContinue) {
-            Remove-Tree $InstallDir
+            $aside = Move-Aside $InstallDir
+            Write-Output "zabbcomm: $InstallDir wasn't locked down, so it was moved unopened to $aside. Check it, then delete it."
         }
         $security = New-Object Security.AccessControl.DirectorySecurity
         $security.SetSecurityDescriptorSddlForm($LockedSddl)

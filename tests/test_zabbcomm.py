@@ -8,7 +8,7 @@ import httpx
 import pytest
 from uvicorn.middleware.proxy_headers import ProxyHeadersMiddleware
 
-import zabbcomm.__main__ as z
+import zabbcomm as z
 
 TOKEN = "test-token-0123456789"
 NOW = 1_000_000.0

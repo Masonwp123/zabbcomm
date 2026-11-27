@@ -6,7 +6,8 @@ set -e
 # Set defaults for PUID, PGID, and paths if not provided
 PUID="${PUID:-1000}"
 PGID="${PGID:-1000}"
-DATA_PATH="${DATA_PATH:-/data}"
+# The same variable and default as the app's DATA_DIR setting.
+DATA_PATH="${DATA_DIR:-/data}"
 
 # Define your application binary name in one place
 APP_BIN="zabbcomm"

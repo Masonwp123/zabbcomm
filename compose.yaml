@@ -43,17 +43,18 @@ services:
       # DEBUG, INFO, WARNING or ERROR
       LOG_LEVEL: INFO
 
+      # Addresses (IPs or CIDRs) of the reverse proxy, as this container sees it. Its
+      # X-Forwarded-For header is trusted for the real device address; if this is
+      # wrong, every device seems to share the proxy's address, sites can't be told
+      # apart, and the log says so. A proxy on this machine arrives from Docker's
+      # network gateway (e.g. 172.18.0.1), so the default trusts Docker's private
+      # ranges. That is safe only while the port below stays on 127.0.0.1. Never use *.
+      FORWARDED_ALLOW_IPS: ${FORWARDED_ALLOW_IPS:-172.16.0.0/12,192.168.0.0/16}
+    ports:
       # The app serves plain HTTP, so only this machine can reach it by default: put a
       # TLS reverse proxy in front. If the proxy runs on another machine, set
-      # PUBLISH_ADDRESS in .env to this machine's address on a trusted network.
-      PUBLISH_ADDRESS: 127.0.0.1
-
-      # IP address or CIDR of the reverse proxy, as this container sees it. A proxy on
-      # the Docker host usually appears as the network's gateway (e.g. 172.18.0.1).
-      # If this is wrong, every device seems to share the proxy's address and sites
-      # can't be told apart. Never use * if clients can reach the app directly.
-      FORWARDED_ALLOW_IPS: ${FORWARDED_ALLOW_IPS:-127.0.0.1}
-    ports:
+      # PUBLISH_ADDRESS in .env to this machine's address on a trusted network, and
+      # set FORWARDED_ALLOW_IPS there to the proxy's address.
       - "${PUBLISH_ADDRESS:-127.0.0.1}:8000:8000"
     volumes:
       - ./docker/data:/data

@@ -98,6 +98,6 @@ template name, e.g. `nodata(/zabbcomm by trapper/zabbcomm.alive,5m)=1`.
   `version:` must not be newer than the server.
 - Every template, item, prototype and trigger needs a stable 32-hex-char `uuid`. Create
   new ones only for new entities, and **never change an existing UUID**.
-- The keys in the template must match the constants in the "Zabbix payloads" section of
-  `../../src/zabbcomm/__main__.py` exactly. Use the
+- The keys in the template must match the constants in `src/zabbcomm/zabbix.py`
+  exactly. Use the
   `zabbix-template` skill when editing.

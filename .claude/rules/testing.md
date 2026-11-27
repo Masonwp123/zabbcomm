@@ -56,3 +56,6 @@ paths:
 15. Deny list (`tests/test_deny.py`): denied devices get a signed `410` and leave the
     registry; no signature without a valid nonce or token; an invalid file denies
     nobody; changes apply without a restart.
+16. `tests/test_regressions.py`: an address change within one network keeps
+    `prev_ip`; the final snapshot can't be overwritten by an older save during
+    shutdown; an untrusted proxy is warned about at most hourly.

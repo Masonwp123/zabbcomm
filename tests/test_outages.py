@@ -6,7 +6,7 @@ from collections.abc import Callable
 
 import pytest
 
-import zabbcomm.__main__ as z
+import zabbcomm as z
 
 INTERVAL, TIMEOUT, EVAL = 900, 2100, 60
 LATE = 120  # seconds a scheduled run may start late
@@ -33,7 +33,7 @@ def simulate(
 ) -> dict[str, float]:
     """Return {status key: first time it reported 0}."""
     rng = random.Random(seed)
-    registry = z.Registry(10, 100, TIMEOUT // 2)
+    registry = z.Registry(10, 100, TIMEOUT // 2, 64)
     offsets = {name: rng.uniform(0, INTERVAL) for name in fleet}
     runs = sorted(
         (offset + k * INTERVAL + rng.uniform(0, LATE), name)

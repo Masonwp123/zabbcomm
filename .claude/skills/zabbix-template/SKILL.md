@@ -1,16 +1,15 @@
 ---
 name: zabbix-template
-description: Create or update zabbix/zabbcomm_template.yaml (the Zabbix template export with trapper items, LLD rules, item/trigger prototypes) so it matches the Zabbix keys defined in src/zabbcomm/__main__.py. Use when adding/renaming/removing a Zabbix item or trigger, or when asked to produce the template for import.
+description: Create or update zabbix/zabbcomm_template.yaml (the Zabbix template export with trapper items, LLD rules, item/trigger prototypes) so it matches the Zabbix keys defined in src/zabbcomm/zabbix.py. Use when adding/renaming/removing a Zabbix item or trigger, or when asked to produce the template for import.
 ---
 
 # Maintain the Zabbix template
 
-The template and the "Zabbix payloads" section of `../../../src/zabbcomm/__main__.py` form one
+The template and `src/zabbcomm/zabbix.py` form one
 contract. If they drift, Zabbix quietly rejects values (`failed: N` in the sender
 responses) and alerts stop firing.
 
-1. **Read the contract.** Read the key constants and builders in the "Zabbix payloads"
-   section of `../../../src/zabbcomm/__main__.py`, plus the key table and trigger design in
+1. **Read the contract.** Read the key constants and builders in `src/zabbcomm/zabbix.py`, plus the key table and trigger design in
    `.claude/rules/zabbix.md`. If the code and the rules file disagree, stop and ask
    which one is right.
 
